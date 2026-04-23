@@ -1,0 +1,9 @@
+interface:
+  display_name: "Codex Image"
+  short_description: "Generate or edit images through OpenAI-compatible APIs"
+  icon_small: "./assets/codex-image.svg"
+  icon_large: "./assets/codex-image.svg"
+  default_prompt: "Use $codex-image only when the built-in image tool path is unavailable or when the user explicitly wants the local script workflow. Keep it positioned as an API-key-mode fallback, not a replacement for built-in image support. This skill is Images API only: use the bundled scripts, send generation and edit requests to `/v1/images/*`, preserve Codex config lookup and output-path behavior, and save the final image to disk with a concrete path."
+
+policy:
+  allow_implicit_invocation: true
