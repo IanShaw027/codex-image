@@ -25,10 +25,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Run unit tests
-        run: python -m unittest discover -s skills/codex-image/tests -p 'test_*.py'
+        run: python -m unittest discover -s tests -p 'test_*.py'
 
       - name: Check CLI syntax
-        run: python -m py_compile skills/codex-image/scripts/codex_image.py
+        run: python -m py_compile skills/codex-image/scripts/codex_image.py tests/test_size_normalization.py tests/test_transport_regressions.py
 
       - name: Check CLI help
         run: python skills/codex-image/scripts/codex_image.py generate --help
