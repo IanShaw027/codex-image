@@ -1,6 +1,6 @@
 ---
 name: codex-image
-description: Use when Codex is running in API key mode and the built-in image tool is unavailable, or when the user explicitly wants a local OpenAI Images API script that preserves Codex config lookup and saves the final image to disk.
+description: Use when generating or editing raster images and the built-in image_gen tool is not exposed in the current Codex session, when Codex is running in API key mode, or when the user explicitly asks for codex-image, saved PNG/JPEG/WebP output, Images API, custom OPENAI_BASE_URL, exact output path, exact size, aspect ratio, or local image CLI workflow.
 ---
 
 # Codex Image Skill
@@ -26,8 +26,9 @@ Subcommands:
 
 Rules:
 
-- Use the built-in/system `imagegen` skill first when the built-in image tool is actually available.
-- Use this skill when Codex is in API key mode and the built-in image tool path is unavailable, or when the user explicitly asks for `codex-image`.
+- Use the built-in/system `imagegen` skill first only when the current session actually exposes the built-in `image_gen` tool and the user did not ask for saved-file/API/CLI output.
+- Use this skill as the default fallback for normal raster image generation or editing when the built-in `image_gen` tool is absent, hidden, unavailable, or fails before producing an image. Do not fall back to hand-drawn SVG, Pillow sketches, screenshots, or one-off scripts unless the user explicitly requests a code-native drawing.
+- Use this skill when Codex is in API key mode, when the user explicitly asks for `codex-image`, or when the task depends on saved files, exact output paths, exact sizes, aspect ratios, PNG/JPEG/WebP output, custom `OPENAI_BASE_URL`, or an OpenAI-compatible Images API endpoint.
 - Use the bundled `scripts/codex_image.py` workflow. Do not create one-off SDK runners.
 - Do not describe this skill as built-in image support. It is a local saved-file workflow.
 - This skill is Images API only. It does not implement `Responses + image_generation`.
