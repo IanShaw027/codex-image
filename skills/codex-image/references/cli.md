@@ -35,6 +35,8 @@ python3 "$CODEX_IMAGE" edit \
   "Change only the background to a bright blue futuristic scene; keep the subject unchanged"
 ```
 
+Use `edit` whenever image files are provided as references. The multipart Images API uses repeated `image` fields for multiple inputs; JSON-only examples may call this an `images` array, but multipart requests should not rename the field to `images`.
+
 Batch:
 
 ```bash
@@ -64,7 +66,7 @@ Windows:
 ## Core options
 
 - `--model <images-model>`
-- `--size <auto|WIDTHxHEIGHT|WIDTH:HEIGHT>`
+- `--size <auto|WIDTHxHEIGHT|WIDTH:HEIGHT|WIDTH:HEIGHT@1k|1k@WIDTH:HEIGHT>`
 - `--quality <low|medium|high|auto>`
 - `--background <auto|opaque|transparent>`
 - `--format <png|jpeg|webp>`
@@ -77,6 +79,7 @@ Windows:
 - `--prompt-file <path>`
 - `--dry-run`
 - `--force`
+- `generate --image` is intentionally rejected; use `edit --image` whenever the model must see image files.
 - `--image <path>` repeated for `edit`
 - `--mask <mask.png>` for `edit`
 - `--input-fidelity <low|high>` for `edit`
@@ -85,7 +88,12 @@ Windows:
 
 - Valid direct sizes are sent as-is.
 - Ratio input such as `16:9`, `9:16`, or `6:16` is converted to the largest valid direct size under the OpenAI image constraints.
-- Invalid explicit sizes such as `1920x1080` are normalized to the nearest valid direct-request size before the request is sent.
+- Ratio plus tier input such as `9:16@1k`, `9:16 1k`, or `1k@9:16` is local CLI syntax, not Images API syntax. The CLI resolves it to a direct `WIDTHxHEIGHT` before sending the API request.
+- Tier names use the short edge as the target baseline: `1k` means short edge around `1024`, `2k` around `2048`, and `4k` around `4096`, then the result is adjusted to the nearest valid API size under the configured constraints.
+- For direct sizes, the CLI also appends a final-canvas constraint to the prompt so the model is asked to compose for the intended final delivery dimensions.
+- Explicit `WIDTHxHEIGHT` sizes are passed to the API unchanged, including non-standard sizes such as `1000x1800`.
+- Explicit non-standard sizes remain the final delivery target. If the API returns a different pixel size with a close aspect ratio, the saved output is verified and resized back to the requested dimensions locally.
+- If the returned aspect ratio differs materially from the requested final size, the CLI fails instead of stretching. The next step should be a user/model decision: retry generation with stronger prompt constraints, crop to cover, pad to contain, or force stretch.
 - Request the final delivery size directly. Do not crop or upscale locally just to hit the target resolution.
 
 Examples:
@@ -93,7 +101,10 @@ Examples:
 - `16:9` -> `3840x2160`
 - `9:16` -> `2160x3840`
 - `6:16` -> `1440x3840`
-- `1920x1080` -> normalized to a valid nearby size before sending
+- `9:16@1k` -> `1008x1792`
+- `9:16@2k` -> `2016x3584`
+- `9:16@4k` -> `2160x3840` due to the maximum-edge and maximum-pixel constraints
+- `1000x1800` -> sent to the API as `1000x1800`; if the returned file differs, resize locally to `1000x1800`
 
 ## Output handling
 

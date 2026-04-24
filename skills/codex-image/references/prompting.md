@@ -45,13 +45,18 @@ Do not add:
 
 - Prefer direct final sizes whenever the user provides an exact delivery size.
 - When the user provides only a ratio like `16:9`, `9:16`, or `6:16`, let the skill convert it to the largest valid direct-request size.
+- When the user provides both a ratio and a tier such as `9:16 1k`, `16:9 2k`, or `4k 9:16`, use the CLI ratio-tier syntax such as `--size '9:16@1k'` rather than passing the plain ratio.
+- Keep the prompt explicit about the final canvas dimensions. The CLI adds this automatically for resolved direct sizes; do not contradict it with text such as "4K" when requesting `1k`.
+- For explicit non-standard sizes, pass the user-requested `WIDTHxHEIGHT` to the API and describe that same final size in the prompt.
+- If the generated result comes back with a materially different aspect ratio, do not silently distort it. Ask whether to retry through the model with stricter canvas wording or apply a chosen post-processing strategy.
 - Do not plan on cropping, padding, or local upscaling after generation.
 
 ## Input images
 
-- Do not assume every provided image is an edit target.
-- For generate requests with references, label the role clearly.
-- For edit requests, restate what must stay fixed.
+- If actual image files are provided for the model to see, use `edit`, not `generate`, even when creating a new poster or mockup.
+- Do not assume every provided image is a base image to modify; some inputs may be role references, product references, style references, or masks.
+- For multi-image edits, label each input role clearly, for example `Input image 1 role: person reference` and `Input image 2 role: product reference`.
+- Restate what must stay fixed from each input image.
 
 ## Iteration
 

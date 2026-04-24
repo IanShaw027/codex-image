@@ -8,13 +8,15 @@ The published skill lives at [`skills/codex-image`](./skills/codex-image).
 
 ## What it supports
 
-- `generate`: create a new image through `/v1/images/generations`
-- `edit`: edit one or more local images through `/v1/images/edits`
+- `generate`: create a new text-prompt-only image through `/v1/images/generations`
+- `edit`: edit or synthesize from one or more local input images through `/v1/images/edits`
 - `generate-batch`: run many generation jobs from a JSONL file
 - Config and auth discovery from `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `$CODEX_HOME/auth.json`, and `$CODEX_HOME/config.toml`
-- Direct valid-size requests, including 4K outputs such as `3840x2160`
-- Ratio-style input such as `16:9`, `9:16`, and `6:16`, normalized into valid OpenAI image sizes
-- Multi-image edit, optional edit mask, and `input_fidelity`
+- Direct size requests, including explicit non-standard values such as `1000x1800`
+- Ratio-style input such as `16:9`, `9:16`, and `6:16`, normalized into valid image sizes
+- Ratio-tier input such as `9:16@1k`, `9:16@2k`, and `9:16@4k`, resolved before calling the API
+- Multi-image reference/edit requests, optional edit mask, and `input_fidelity`
+- Saved-output dimension verification with safe post-processing for close aspect-ratio mismatches
 - Multi-image output with `--n`
 - Cross-platform scripts for macOS, Linux, and Windows
 
@@ -103,6 +105,22 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" 
   "Draw a clean futuristic AI wallpaper"
 ```
 
+Generate from a ratio tier:
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" generate \
+  --size '9:16@1k' \
+  "Create a vertical mobile livestream screenshot mockup"
+```
+
+Generate with an explicit non-standard delivery size:
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" generate \
+  --size 1000x1800 \
+  "Create a vertical promotional poster"
+```
+
 Edit:
 
 ```bash
@@ -122,14 +140,18 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" 
   "Replace only the masked area with a futuristic blue glow"
 ```
 
-Edit with multiple input images:
+Create a new promotional image from multiple input references:
 
 ```bash
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" edit \
-  --image ./ref-a.png \
-  --image ./ref-b.png \
-  "Blend both references into one polished product image"
+  --image ./person.png \
+  --image ./bag.png \
+  --size 16:9 \
+  "Input image 1 role: person reference. Input image 2 role: handbag product reference. Create a polished commercial promotional image showing the person from input image 1 holding the handbag from input image 2. No logos, no readable text, no watermark."
 ```
+
+Use `edit`, not `generate`, whenever image files are provided for the model to see. Multiple input files are sent as repeated multipart `image` fields.
+The `generate` subcommand rejects `--image` to prevent accidentally converting image-reference tasks into text-only prompts.
 
 Generate multiple variants from one prompt:
 

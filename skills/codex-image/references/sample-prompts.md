@@ -48,6 +48,20 @@ Constraints: no logos, no watermark
 
 ## Edit
 
+### Multi-reference product poster
+
+```text
+Use case: product-mockup
+Asset type: commercial promotional poster
+Input image 1 role: person reference; preserve the recognizable styling, pose direction, clothing, and overall personality cues.
+Input image 2 role: handbag product reference; preserve the bag shape, color, handles, strap detail, tag, and material feel.
+Primary request: create a polished advertising image showing the person from input image 1 holding the handbag from input image 2.
+Scene/backdrop: clean studio background with soft gradient and subtle shadow, premium fashion e-commerce campaign atmosphere
+Style/medium: photorealistic commercial fashion ad, crisp product lighting, high-end catalog polish
+Composition/framing: wide 16:9 layout, person slightly left of center, bag clearly visible in the foreground, negative space on the right for future copy, no actual text
+Constraints: tasteful and non-explicit; no logos, no readable text, no watermark; keep the product close to input image 2 and the person styling close to input image 1
+```
+
 ### Background-only edit
 
 ```text

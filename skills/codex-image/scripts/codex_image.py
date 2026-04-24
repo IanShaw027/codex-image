@@ -8,6 +8,8 @@ import math
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
 import sys
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -38,8 +40,14 @@ IMAGE_MAX_PIXELS = 8_294_400
 IMAGE_MAX_RATIO = 3.0
 IMAGE_MAX_N = 10
 IMAGE_MAX_EDIT_IMAGES = 16
+OUTPUT_RESIZE_MAX_RATIO_DELTA = 0.05
 SIZE_DIMENSION_PATTERN = re.compile(r"^\s*(\d+)\s*[xX×]\s*(\d+)\s*$")
 SIZE_RATIO_PATTERN = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*$")
+SIZE_TIER_PATTERN = re.compile(r"^\s*([1-9]\d*)\s*[kK]\s*$")
+SIZE_RATIO_TIER_PATTERN = re.compile(
+    r"^\s*(?:(\d+\s*:\s*\d+)\s*(?:@|,|\s+)\s*([1-9]\d*\s*[kK])|"
+    r"([1-9]\d*\s*[kK])\s*(?:@|,|\s+)\s*(\d+\s*:\s*\d+))\s*$"
+)
 
 
 def log(message: str) -> None:
@@ -119,6 +127,43 @@ def iter_ratio_candidates(width_ratio: int, height_ratio: int) -> list[tuple[int
     return candidates
 
 
+def parse_ratio(raw_ratio: str) -> tuple[int, int]:
+    ratio_match = SIZE_RATIO_PATTERN.match(raw_ratio)
+    if not ratio_match:
+        fail(f"invalid image ratio: {raw_ratio}")
+
+    width_ratio = int(ratio_match.group(1))
+    height_ratio = int(ratio_match.group(2))
+    if width_ratio <= 0 or height_ratio <= 0:
+        fail(f"invalid image ratio: {raw_ratio}")
+    return width_ratio, height_ratio
+
+
+def parse_size_tier(raw_tier: str) -> int:
+    tier_match = SIZE_TIER_PATTERN.match(raw_tier)
+    if not tier_match:
+        fail(f"invalid image size tier: {raw_tier}")
+    return int(tier_match.group(1)) * 1024
+
+
+def choose_ratio_tier_candidate(width_ratio: int, height_ratio: int, tier_edge: int) -> tuple[int, int]:
+    candidates = iter_ratio_candidates(width_ratio, height_ratio)
+    ratio = Fraction(width_ratio, height_ratio).limit_denominator(256)
+
+    if ratio.numerator >= ratio.denominator:
+        target_height = tier_edge
+        target_width = round(tier_edge * ratio.numerator / ratio.denominator)
+    else:
+        target_width = tier_edge
+        target_height = round(tier_edge * ratio.denominator / ratio.numerator)
+
+    return choose_candidate(
+        candidates,
+        target_width=target_width,
+        target_height=target_height,
+    )
+
+
 def choose_candidate(
     candidates: list[tuple[int, int]],
     *,
@@ -152,29 +197,37 @@ def normalize_image_size(spec: str) -> tuple[str, str | None]:
     if raw_spec.lower() == "auto":
         return "auto", None
 
-    dim_match = SIZE_DIMENSION_PATTERN.match(raw_spec)
-    if dim_match:
-        width = int(dim_match.group(1))
-        height = int(dim_match.group(2))
-        if validate_image_size(width, height) is None:
-            return f"{width}x{height}", None
+    tier_match = SIZE_TIER_PATTERN.match(raw_spec)
+    if tier_match:
+        tier_edge = parse_size_tier(raw_spec)
+        normalized = f"{tier_edge}x{tier_edge}"
+        if validate_image_size(tier_edge, tier_edge) is None:
+            return normalized, f"normalized image size {raw_spec} -> {normalized}"
+        fail(f"invalid image size tier: {raw_spec}")
 
-        ratio = Fraction(width, height).limit_denominator(256)
-        candidates = iter_ratio_candidates(ratio.numerator, ratio.denominator)
-        normalized_width, normalized_height = choose_candidate(
-            candidates,
-            target_width=width,
-            target_height=height,
+    ratio_tier_match = SIZE_RATIO_TIER_PATTERN.match(raw_spec)
+    if ratio_tier_match:
+        raw_ratio = ratio_tier_match.group(1) or ratio_tier_match.group(4)
+        raw_tier = ratio_tier_match.group(2) or ratio_tier_match.group(3)
+        width_ratio, height_ratio = parse_ratio(raw_ratio)
+        tier_edge = parse_size_tier(raw_tier)
+        normalized_width, normalized_height = choose_ratio_tier_candidate(
+            width_ratio,
+            height_ratio,
+            tier_edge,
         )
         normalized = f"{normalized_width}x{normalized_height}"
         return normalized, f"normalized image size {raw_spec} -> {normalized}"
 
+    dim_match = SIZE_DIMENSION_PATTERN.match(raw_spec)
+    if dim_match:
+        width = int(dim_match.group(1))
+        height = int(dim_match.group(2))
+        return f"{width}x{height}", None
+
     ratio_match = SIZE_RATIO_PATTERN.match(raw_spec)
     if ratio_match:
-        width_ratio = int(ratio_match.group(1))
-        height_ratio = int(ratio_match.group(2))
-        if width_ratio <= 0 or height_ratio <= 0:
-            fail(f"invalid image ratio: {raw_spec}")
+        width_ratio, height_ratio = parse_ratio(raw_spec)
 
         normalized_width, normalized_height = choose_candidate(
             iter_ratio_candidates(width_ratio, height_ratio)
@@ -184,8 +237,49 @@ def normalize_image_size(spec: str) -> tuple[str, str | None]:
 
     fail(
         "invalid image size. Use auto, WIDTHxHEIGHT, or WIDTH:HEIGHT "
-        "(examples: 3840x2160, 1792x1024, 9:16)"
+        "(examples: 3840x2160, 1792x1024, 9:16, 9:16@1k)"
     )
+
+
+def requested_delivery_size(spec: str, api_size: str) -> str | None:
+    raw_spec = spec.strip()
+    if raw_spec.lower() == "auto" or api_size == "auto":
+        return None
+
+    dim_match = SIZE_DIMENSION_PATTERN.match(raw_spec)
+    if dim_match:
+        return f"{int(dim_match.group(1))}x{int(dim_match.group(2))}"
+
+    return api_size
+
+
+def prompt_size_constraint(size: str) -> str | None:
+    dim_match = SIZE_DIMENSION_PATTERN.match(size)
+    if not dim_match:
+        return None
+
+    width = int(dim_match.group(1))
+    height = int(dim_match.group(2))
+    if width == height:
+        orientation = "square"
+    elif width > height:
+        orientation = "landscape"
+    else:
+        orientation = "portrait"
+
+    return (
+        "Final output constraint: compose for an exact "
+        f"{width}x{height} pixel {orientation} canvas. "
+        "The generated image should visually match that final canvas size and aspect ratio; "
+        "do not imply a different resolution, crop, border, or padding."
+    )
+
+
+def augment_prompt_with_size(prompt: str, size: str) -> str:
+    constraint = prompt_size_constraint(size)
+    if constraint is None or constraint in prompt:
+        return prompt
+    return f"{prompt.rstrip()}\n\n{constraint}"
 
 
 def validate_background(background: str) -> None:
@@ -421,7 +515,99 @@ def resolve_output_paths(
     return [base_dir / f"{group}-{idx}{ext}" for idx in range(1, count + 1)]
 
 
-def decode_and_save_many(images_b64: list[str], out_paths: list[Path], *, force: bool) -> list[Path]:
+def parse_direct_size(size: str | None) -> tuple[int, int] | None:
+    if not size:
+        return None
+    dim_match = SIZE_DIMENSION_PATTERN.match(size)
+    if not dim_match:
+        return None
+    return int(dim_match.group(1)), int(dim_match.group(2))
+
+
+def read_image_dimensions(path: Path) -> tuple[int, int] | None:
+    if shutil.which("sips") is None:
+        return None
+    result = subprocess.run(
+        ["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+
+    width = None
+    height = None
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("pixelWidth:"):
+            width = int(stripped.split(":", 1)[1].strip())
+        elif stripped.startswith("pixelHeight:"):
+            height = int(stripped.split(":", 1)[1].strip())
+    if width is None or height is None:
+        return None
+    return width, height
+
+
+def resize_image_to_size(path: Path, width: int, height: int) -> None:
+    if shutil.which("sips") is None:
+        fail(
+            f"generated image {path} does not match requested size and local sips is unavailable "
+            "for post-processing"
+        )
+    result = subprocess.run(
+        ["sips", "-z", str(height), str(width), str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        fail(f"failed to resize generated image {path}: {result.stderr.strip() or result.stdout.strip()}")
+
+
+def ensure_output_dimensions(path: Path, expected_size: str | None) -> None:
+    expected = parse_direct_size(expected_size)
+    if expected is None:
+        return
+
+    actual = read_image_dimensions(path)
+    if actual is None:
+        log(f"could not verify output dimensions for {path}")
+        return
+    if actual == expected:
+        log(f"verified output size {path}: {actual[0]}x{actual[1]}")
+        return
+
+    expected_ratio = expected[0] / expected[1]
+    actual_ratio = actual[0] / actual[1]
+    ratio_delta = abs(actual_ratio - expected_ratio) / expected_ratio
+    if ratio_delta > OUTPUT_RESIZE_MAX_RATIO_DELTA:
+        fail(
+            f"generated image aspect ratio differs too much for automatic resize: "
+            f"expected {expected[0]}x{expected[1]} ({expected_ratio:.4f}), "
+            f"got {actual[0]}x{actual[1]} ({actual_ratio:.4f}). "
+            "Do not stretch automatically; ask the user whether to retry generation, crop to cover, "
+            "pad to contain, or force stretch."
+        )
+
+    resize_image_to_size(path, expected[0], expected[1])
+    resized = read_image_dimensions(path)
+    if resized != expected:
+        actual_text = "unknown" if resized is None else f"{resized[0]}x{resized[1]}"
+        fail(f"post-resize output size mismatch for {path}: expected {expected_size}, got {actual_text}")
+    log(
+        f"resized output {path}: {actual[0]}x{actual[1]} -> "
+        f"{expected[0]}x{expected[1]}"
+    )
+
+
+def decode_and_save_many(
+    images_b64: list[str],
+    out_paths: list[Path],
+    *,
+    force: bool,
+    expected_size: str | None,
+) -> list[Path]:
     if not images_b64:
         fail("image generation result missing in images payload")
     if len(images_b64) < len(out_paths):
@@ -434,6 +620,7 @@ def decode_and_save_many(images_b64: list[str], out_paths: list[Path], *, force:
         if out_path.exists() and not force:
             fail(f"output already exists: {out_path} (use --force to overwrite)")
         out_path.write_bytes(base64.b64decode(images_b64[idx]))
+        ensure_output_dimensions(out_path, expected_size)
         written.append(out_path)
     return written
 
@@ -565,8 +752,10 @@ def effective_model(args_model: str | None, runtime: dict[str, Any]) -> str:
 def common_runtime_values(
     args: argparse.Namespace,
     runtime: dict[str, Any],
-) -> tuple[str, str, str, int | None, str, str, str | None]:
-    size, size_note = normalize_image_size(args.size or runtime["size"])
+) -> tuple[str, str | None, str, str, int | None, str, str, str | None]:
+    requested_size = args.size or runtime["size"]
+    size, size_note = normalize_image_size(requested_size)
+    delivery_size = requested_delivery_size(requested_size, size)
     quality = args.quality or runtime["quality"]
     fmt = validate_format(args.format or runtime["format"])
     compression_raw = args.compression if args.compression is not None else runtime["compression"]
@@ -578,7 +767,7 @@ def common_runtime_values(
     validate_moderation(moderation)
     validate_compression(compression)
     validate_transparency(background, fmt)
-    return size, quality, fmt, compression, background, moderation, size_note
+    return size, delivery_size, quality, fmt, compression, background, moderation, size_note
 
 
 def ensure_api_key(runtime: dict[str, Any]) -> str:
@@ -707,9 +896,11 @@ def build_generate_payload(
 def cmd_generate(args: argparse.Namespace) -> int:
     runtime = resolve_runtime()
     api_key = ensure_api_key(runtime)
+    if getattr(args, "image", None):
+        fail("generate does not accept image inputs; use `edit --image <path>` for any request where the model must see reference images")
     prompt = read_prompt(args.prompt, args.prompt_file)
     model = effective_model(args.model, runtime)
-    size, quality, fmt, compression, background, moderation, size_note = common_runtime_values(args, runtime)
+    size, delivery_size, quality, fmt, compression, background, moderation, size_note = common_runtime_values(args, runtime)
     n = args.n
     validate_n(n)
 
@@ -734,7 +925,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     payload = build_generate_payload(
         model=model,
-        prompt=prompt,
+        prompt=augment_prompt_with_size(prompt, delivery_size or size),
         n=n,
         size=size,
         quality=quality,
@@ -759,7 +950,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
         payload,
         runtime["timeout"],
     )
-    written = decode_and_save_many(extract_images_from_images_payload(data), out_paths, force=args.force)
+    written = decode_and_save_many(
+        extract_images_from_images_payload(data),
+        out_paths,
+        force=args.force,
+        expected_size=delivery_size,
+    )
     for path in written:
         log(f"generate saved {path}")
         print(str(path))
@@ -776,7 +972,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
         fail(f"mask image not found: {mask_path}")
 
     model = effective_model(args.model, runtime)
-    size, quality, fmt, compression, background, moderation, size_note = common_runtime_values(args, runtime)
+    size, delivery_size, quality, fmt, compression, background, moderation, size_note = common_runtime_values(args, runtime)
     validate_input_fidelity(args.input_fidelity)
     n = args.n
     validate_n(n)
@@ -804,7 +1000,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
 
     fields: dict[str, Any] = {
         "model": model,
-        "prompt": prompt,
+        "prompt": augment_prompt_with_size(prompt, delivery_size or size),
         "n": n,
         "size": size,
         "quality": quality,
@@ -843,7 +1039,12 @@ def cmd_edit(args: argparse.Namespace) -> int:
         files,
         runtime["timeout"],
     )
-    written = decode_and_save_many(extract_images_from_images_payload(data), out_paths, force=args.force)
+    written = decode_and_save_many(
+        extract_images_from_images_payload(data),
+        out_paths,
+        force=args.force,
+        expected_size=delivery_size,
+    )
     for path in written:
         log(f"edit saved {path}")
         print(str(path))
@@ -864,7 +1065,9 @@ def run_batch_job(
 ) -> list[str] | str:
     prompt = read_prompt(str(job.get("prompt", "")), None)
     model = str(job.get("model") or defaults["model"])
-    size, size_note = normalize_image_size(str(job.get("size") or defaults["size"]))
+    requested_size = str(job.get("size") or defaults["size"])
+    size, size_note = normalize_image_size(requested_size)
+    delivery_size = requested_delivery_size(requested_size, size)
     quality = str(job.get("quality") or defaults["quality"])
     fmt = validate_format(str(job.get("format") or defaults["format"]))
     compression_value = job.get("compression", defaults["compression"])
@@ -892,7 +1095,7 @@ def run_batch_job(
 
     payload = build_generate_payload(
         model=model,
-        prompt=prompt,
+        prompt=augment_prompt_with_size(prompt, delivery_size or size),
         n=n,
         size=size,
         quality=quality,
@@ -925,7 +1128,12 @@ def run_batch_job(
         payload,
         timeout,
     )
-    written = decode_and_save_many(extract_images_from_images_payload(data), out_paths, force=force)
+    written = decode_and_save_many(
+        extract_images_from_images_payload(data),
+        out_paths,
+        force=force,
+        expected_size=delivery_size,
+    )
     return [str(path) for path in written]
 
 
@@ -1041,6 +1249,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--dry-run", action="store_true", help="print the request payload without calling the API")
 
     gen = sub.add_parser("generate", parents=[common], help="generate a new image")
+    gen.add_argument("--image", action="append", help="not supported for generate; use edit --image for reference images")
     gen.add_argument("prompt", nargs="?", help="generation prompt")
     gen.set_defaults(func=cmd_generate)
 
