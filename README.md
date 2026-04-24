@@ -197,6 +197,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" 
 codex-image/
 ├── README.md
 ├── LICENSE
+├── tests/
 └── skills/
     └── codex-image/
         ├── SKILL.md
@@ -204,6 +205,14 @@ codex-image/
         ├── assets/
         ├── references/
         └── scripts/
+```
+
+## Testing
+
+Run the repo tests from the repository root:
+
+```bash
+/opt/homebrew/bin/python3.12 -m unittest discover -s ./tests -p 'test_*.py'
 ```
 
 ## Skill docs

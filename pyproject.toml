@@ -32,7 +32,7 @@ Repository = "https://github.com/IanShaw027/codex-image"
 Issues = "https://github.com/IanShaw027/codex-image/issues"
 
 [tool.pytest.ini_options]
-testpaths = ["skills/codex-image/tests"]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
 
 [tool.ruff]
