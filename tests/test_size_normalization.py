@@ -38,10 +38,10 @@ class SizeNormalizationTests(unittest.TestCase):
         default_prompt = match.group(1)
         self.assertIn("CODEX_HOME", default_prompt)
         self.assertNotIn("/Users/ianshaw/", default_prompt)
-        self.assertRegex(default_prompt.lower(), r"config.*auth")
-        self.assertRegex(default_prompt.lower(), r"--help")
-        self.assertIn("Codex-thread-only", default_prompt)
-        self.assertIn("outside a thread use real file paths", default_prompt)
+        self.assertIn("Prefer built-in `imagegen`", default_prompt)
+        self.assertIn("current-turn image context", default_prompt)
+        self.assertIn("explicit local references", default_prompt)
+        self.assertIn(".cmd", default_prompt)
 
     def test_launcher_script_exists_and_execs_codex_image(self):
         launcher = LAUNCHER_PATH.read_text(encoding="utf-8")
@@ -185,6 +185,7 @@ class SizeNormalizationTests(unittest.TestCase):
             "api_key": "key",
             "base_url": "https://example.com",
             "model": codex_image.DEFAULT_MODEL,
+            "transport": "images",
             "size": codex_image.DEFAULT_SIZE,
             "quality": codex_image.DEFAULT_QUALITY,
             "format": codex_image.DEFAULT_FORMAT,
@@ -202,8 +203,7 @@ class SizeNormalizationTests(unittest.TestCase):
 
         preview = maybe_print_preview.call_args.args[0]
         self.assertTrue(preview["prompt"].startswith("draw a skyline"))
-        self.assertIn("1024x1024", preview["prompt"])
-        self.assertIn("Final output constraint", preview["prompt"])
+        self.assertEqual(preview["prompt"], "draw a skyline")
 
     def test_edit_inputs_accept_explicit_prompt_flag(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1071,7 +1071,7 @@ class SizeNormalizationTests(unittest.TestCase):
                 {"CODEX_HOME": tmpdir, "CODEX_THREAD_ID": "thread-save"},
                 clear=False,
             ):
-                with mock.patch.object(codex_image, "resolve_runtime", return_value={"base_url": "https://example.com", "timeout": 30, "output_dir": str(tmp), "size": "1024x1024", "quality": "medium", "format": "png", "compression": None, "background": "auto", "moderation": "auto", "model": "gpt-image-2"}):
+                with mock.patch.object(codex_image, "resolve_runtime", return_value={"base_url": "https://example.com", "timeout": 30, "output_dir": str(tmp), "size": "1024x1024", "quality": "medium", "format": "png", "compression": None, "background": "auto", "moderation": "auto", "model": "gpt-image-2", "transport": "images"}):
                     with mock.patch.object(codex_image, "ensure_api_key", return_value="test-key"):
                         with mock.patch.object(codex_image, "effective_model", return_value="gpt-image-2"):
                             with mock.patch.object(codex_image, "common_runtime_values", return_value=("1024x1024", "1024x1024", "medium", "png", None, "auto", "auto", None)):
@@ -1114,7 +1114,7 @@ class SizeNormalizationTests(unittest.TestCase):
                 {"CODEX_HOME": tmpdir, "CODEX_THREAD_ID": "thread-last-save"},
                 clear=False,
             ):
-                with mock.patch.object(codex_image, "resolve_runtime", return_value={"base_url": "https://example.com", "timeout": 30, "output_dir": str(tmp), "size": "1024x1024", "quality": "medium", "format": "png", "compression": None, "background": "auto", "moderation": "auto", "model": "gpt-image-2"}):
+                with mock.patch.object(codex_image, "resolve_runtime", return_value={"base_url": "https://example.com", "timeout": 30, "output_dir": str(tmp), "size": "1024x1024", "quality": "medium", "format": "png", "compression": None, "background": "auto", "moderation": "auto", "model": "gpt-image-2", "transport": "images"}):
                     with mock.patch.object(codex_image, "ensure_api_key", return_value="test-key"):
                         with mock.patch.object(codex_image, "effective_model", return_value="gpt-image-2"):
                             with mock.patch.object(codex_image, "common_runtime_values", return_value=("1024x1024", "1024x1024", "medium", "png", None, "auto", "auto", None)):
@@ -1167,6 +1167,7 @@ class SizeNormalizationTests(unittest.TestCase):
                         "api_key": "test-key",
                         "base_url": "https://example.com",
                         "model": "gpt-image-2",
+                        "transport": "images",
                         "size": "1024x1024",
                         "quality": "medium",
                         "format": "png",

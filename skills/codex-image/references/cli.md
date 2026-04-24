@@ -12,16 +12,18 @@ On Windows, use `%CODEX_HOME%\skills\codex-image\scripts\codex-image.cmd` or `%U
 
 ## Commands
 
-- `generate`: `POST /v1/images/generations`
-- `edit`: `POST /v1/images/edits`
+- `generate`: default `POST /v1/images/generations`; explicit `--transport responses` uses `POST /v1/responses`
+- `edit`: default `POST /v1/images/edits`; explicit `--transport responses` uses `POST /v1/responses`
 - `generate-batch`: many generation jobs from JSONL
 
 ## Common shapes
 
 ```bash
 bash "$CODEX_IMAGE" generate --size 3840x2160 "Prompt"
+bash "$CODEX_IMAGE" generate --transport responses --response-image-id ig_123 --prompt "Refine this image"
 bash "$CODEX_IMAGE" generate --size 3840x2160 --prompt "Prompt when shell quoting is awkward"
 bash "$CODEX_IMAGE" edit --image ./input.png "Change only X; keep Y unchanged"
+bash "$CODEX_IMAGE" edit --transport responses --previous-response-id resp_123 --prompt "Continue refining the last generated image"
 bash "$CODEX_IMAGE" edit --image ./input.png --prompt "Change only X; keep Y unchanged"
 bash "$CODEX_IMAGE" edit --image '[Image #1]' "Use the most recent attachment-bearing turn in this Codex thread"
 bash "$CODEX_IMAGE" edit --image '[Turn -1 Image #1]' --image '[Thread Image #3]' "Mix prior-turn and thread-wide references"
@@ -36,9 +38,13 @@ bash "$CODEX_IMAGE" generate-batch --input ./prompts.jsonl --out-dir ./output/ba
 ## Key rules
 
 - If the model must see any real image input, use `edit`.
+- If the user wants the normal native image conversation path, current-turn image context, or the fastest simple follow-up and does not need local file/output-path control, prefer built-in `imagegen` instead of this skill.
+- `generate` and `edit` stay on the Images API by default; use `--transport responses` only when explicit prior response image state is part of the task.
+- In `responses` mode, `edit --previous-response-id ...` may omit local `--image` inputs when the follow-up should continue from prior response state alone.
 - After this skill is selected, usually invoke the installed launcher first and let it own runtime, auth, and attachment validation. Reach for config/auth or `--help` only when the launcher is missing or its failure still needs interpretation.
 - `generate --image` emits a warning and is rerouted to `edit`.
-- `--image '[Image #N]'` resolves against the most recent attachment-bearing user turn, not necessarily the current turn or the most recent text-only user message.
+- Placeholder references are an explicit local thread workflow. They are not the same thing as built-in `imagegen`'s native current-turn runtime image context.
+- `--image '[Image #N]'` resolves against the most recent attachment-bearing user turn, not necessarily the current turn or the most recent text-only user message. If the current turn has no attachments, treat it as a historical reference rather than native current-turn image context.
 - `--image '[Turn -K Image #N]'` resolves against the `K`th previous attachment-bearing user turn.
 - `--image '[Thread Image #N]'` resolves against stable thread-wide attachment order.
 - `--image '[Last Output]'` or `--image '[Last Output #N]'` resolves against the previous saved output image list for the thread.
@@ -67,6 +73,9 @@ bash "$CODEX_IMAGE" generate-batch --input ./prompts.jsonl --out-dir ./output/ba
 - `--name <readable-prefix>`
 - `--prompt-file <path>`
 - `--prompt <text>` for `generate` and `edit`
+- `--transport <images|responses>` for `generate` and `edit`
+- `--previous-response-id <resp_id>` for `generate` and `edit` when using `responses`
+- `--response-image-id <ig_id>` for `generate` and `edit` when using `responses`
 - `--dry-run`
 - `--force`
 - `--image <path>` repeated for `edit`
@@ -101,6 +110,7 @@ Common resolved sizes:
 - `--out-dir` is best for batch or multi-output work.
 - `--name` keeps the default directory and adds an automatic random suffix.
 - When `--n > 1`, numbered sibling files are created.
+- Successful `responses` calls also write `${CODEX_HOME:-~/.codex}/generated_images/<thread>/last_responses_state.json` with the latest `response_id` and `image_generation_call_ids`, and log those ids to stderr.
 
 ## Batch input
 

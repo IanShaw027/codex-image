@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import math
 import mimetypes
@@ -17,6 +18,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Iterable, NoReturn
 from urllib import error, request
+from urllib import parse as urlparse
 
 try:
     import tomllib
@@ -28,6 +30,7 @@ DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_SIZE = "1024x1024"
 DEFAULT_QUALITY = "medium"
 DEFAULT_FORMAT = "png"
+DEFAULT_TRANSPORT = "images"
 DEFAULT_TIMEOUT = 600
 DEFAULT_BACKGROUND = "auto"
 DEFAULT_MODERATION = "auto"
@@ -59,6 +62,10 @@ THREAD_ATTACHMENT_PLACEHOLDER_PATTERN = re.compile(
 LAST_OUTPUT_PLACEHOLDER_PATTERN = re.compile(
     r"^\s*\[Last\s+Output(?:\s*#\s*(\d+)\s*)?\]\s*$",
     re.IGNORECASE,
+)
+DATA_URL_IMAGE_PATTERN = re.compile(
+    r"^\s*data:([a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+);base64,(.+)\s*$",
+    re.IGNORECASE | re.DOTALL,
 )
 SIZE_RATIO_TIER_PATTERN = re.compile(
     r"^\s*(?:(\d+\s*:\s*\d+)\s*(?:@|,|\s+)\s*([1-9]\d*\s*[kK])|"
@@ -306,6 +313,17 @@ def augment_prompt_with_size(prompt: str, size: str) -> str:
     return f"{prompt.rstrip()}\n\n{constraint}"
 
 
+def prompt_with_delivery_constraint(
+    prompt: str,
+    *,
+    api_size: str,
+    delivery_size: str | None,
+) -> str:
+    if delivery_size is None or delivery_size == api_size:
+        return prompt
+    return augment_prompt_with_size(prompt, delivery_size)
+
+
 def validate_background(background: str) -> None:
     if background not in {"auto", "opaque", "transparent"}:
         fail("background must be one of auto, opaque, or transparent")
@@ -456,6 +474,7 @@ def resolve_runtime() -> dict[str, Any]:
         "api_key": api_key,
         "base_url": ensure_base_url(base_url, config_path=config_path, provider_id=provider_id),
         "model": resolve_default_model(config),
+        "transport": os.environ.get("CODEX_IMAGE_TRANSPORT", DEFAULT_TRANSPORT),
         "size": os.environ.get("CODEX_IMAGE_SIZE", DEFAULT_SIZE),
         "quality": os.environ.get("CODEX_IMAGE_QUALITY", DEFAULT_QUALITY),
         "format": validate_format(os.environ.get("CODEX_IMAGE_FORMAT", DEFAULT_FORMAT)),
@@ -506,15 +525,33 @@ def looks_like_pathish_prompt(value: str) -> bool:
     candidate = value.strip()
     if not candidate:
         return False
+    has_path_separators = any(sep in candidate for sep in (os.sep, "/", "\\"))
+    has_path_prefix = candidate.startswith(("~", "."))
     path = Path(candidate).expanduser()
-    if path.is_file():
-        return True
-    if any(sep in candidate for sep in (os.sep, "/", "\\")):
-        return True
-    if candidate.startswith(("~", ".")):
-        return True
     suffix = path.suffix.lower()
-    return suffix in {".txt", ".md", ".prompt"}
+    has_path_suffix = suffix in {".txt", ".md", ".prompt"}
+    should_probe_filesystem = (
+        len(candidate) < 240
+        and "\n" not in candidate
+        and not candidate.endswith(".")
+        and (
+            has_path_separators
+            or has_path_prefix
+            or has_path_suffix
+            or (" " not in candidate and "\t" not in candidate)
+        )
+    )
+    if should_probe_filesystem:
+        try:
+            if path.is_file():
+                return True
+        except OSError:
+            return False
+    if has_path_separators:
+        return True
+    if has_path_prefix:
+        return True
+    return has_path_suffix
 
 
 def normalize_legacy_cli_args(argv: list[str]) -> list[str]:
@@ -609,6 +646,14 @@ def last_output_set_path(thread_id: str) -> Path:
     return thread_output_dir(thread_id) / "last_output_set.json"
 
 
+def last_responses_state_path(thread_id: str) -> Path:
+    return thread_output_dir(thread_id) / "last_responses_state.json"
+
+
+def rollout_inline_image_dir(thread_id: str) -> Path:
+    return thread_output_dir(thread_id) / "rollout_images"
+
+
 def find_thread_rollout_path(thread_id: str) -> Path:
     sessions_dir = codex_home_dir() / "sessions"
     matches = sorted(sessions_dir.rglob(f"rollout-*-{thread_id}.jsonl"))
@@ -670,6 +715,68 @@ def flatten_thread_attachments(
     return flattened
 
 
+def cache_rollout_inline_image(thread_id: str, raw: str) -> str | None:
+    match = DATA_URL_IMAGE_PATTERN.match(raw)
+    if not match:
+        return None
+    mime = match.group(1).lower()
+    if not mime.startswith("image/"):
+        return None
+    encoded = match.group(2).strip()
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except Exception:
+        return None
+
+    suffix = mimetypes.guess_extension(mime) or ".img"
+    if suffix == ".jpe":
+        suffix = ".jpg"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+    path = ensure_parent(rollout_inline_image_dir(thread_id) / f"{digest}{suffix}")
+    if not path.is_file():
+        path.write_bytes(decoded)
+    return str(path.resolve())
+
+
+def cache_rollout_remote_image(thread_id: str, raw: str) -> str | None:
+    try:
+        parsed = urlparse.urlparse(raw.strip())
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+
+    try:
+        with request.urlopen(raw, timeout=20) as response:
+            content_type = response.headers.get_content_type().lower()
+            if not content_type.startswith("image/"):
+                return None
+            decoded = response.read()
+    except Exception:
+        return None
+
+    suffix = mimetypes.guess_extension(content_type) or Path(parsed.path).suffix or ".img"
+    if suffix == ".jpe":
+        suffix = ".jpg"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+    path = ensure_parent(rollout_inline_image_dir(thread_id) / f"{digest}{suffix}")
+    if not path.is_file():
+        path.write_bytes(decoded)
+    return str(path.resolve())
+
+
+def resolve_rollout_image_reference(thread_id: str, raw: str) -> str | None:
+    cached = cache_rollout_inline_image(thread_id, raw)
+    if cached is not None:
+        return cached
+    cached = cache_rollout_remote_image(thread_id, raw)
+    if cached is not None:
+        return cached
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return None
+
+
 def read_thread_attachment_turns(thread_id: str) -> list[tuple[list[str], Path | None]]:
     rollout_path = find_thread_rollout_path(thread_id)
     try:
@@ -715,9 +822,21 @@ def read_thread_attachment_turns(thread_id: str) -> list[tuple[list[str], Path |
         if entry.get("type") != "event_msg" or payload.get("type") != "user_message":
             continue
 
+        resolved_images: list[str] = []
         local_images = payload.get("local_images")
-        if isinstance(local_images, list) and local_images:
-            attachment_turns.append(([str(item) for item in local_images], current_turn_cwd))
+        if isinstance(local_images, list):
+            resolved_images.extend(str(item) for item in local_images if isinstance(item, str) and item.strip())
+        images = payload.get("images")
+        if isinstance(images, list):
+            resolved_images.extend(
+                resolved
+                for item in images
+                if isinstance(item, str)
+                for resolved in [resolve_rollout_image_reference(thread_id, item)]
+                if resolved is not None
+            )
+        if resolved_images:
+            attachment_turns.append((resolved_images, current_turn_cwd))
             if len(attachment_turns) > THREAD_ATTACHMENT_MAX_TURNS:
                 fail(
                     "thread attachment history is too large to scan safely "
@@ -731,7 +850,7 @@ def load_thread_attachment_turns(thread_id: str) -> list[tuple[list[str], Path |
 
     if not attachment_turns:
         fail(
-            "no local image attachments were found in the Codex session rollout; "
+            "no image attachments were found in the Codex session rollout; "
             "use a real file path or attach the image in the current conversation first"
         )
     return attachment_turns
@@ -818,6 +937,22 @@ def save_last_output_set(thread_id: str, images: list[Path]) -> None:
     payload = {
         "thread_id": thread_id,
         "images": [str(path_item.resolve()) for path_item in dedupe_paths(images)],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def save_last_responses_state(
+    thread_id: str,
+    *,
+    response_id: str | None,
+    image_generation_call_ids: list[str],
+) -> None:
+    path = last_responses_state_path(thread_id)
+    ensure_parent(path)
+    payload = {
+        "thread_id": thread_id,
+        "response_id": response_id,
+        "image_generation_call_ids": image_generation_call_ids,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1177,6 +1312,12 @@ def build_headers(api_key: str, content_type: str) -> dict[str, str]:
     }
 
 
+def encode_image_data_url(path: Path) -> str:
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
 def post_json(url: str, api_key: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
     log(f"POST {url}")
     body = json.dumps(payload).encode("utf-8")
@@ -1281,8 +1422,143 @@ def extract_images_from_images_payload(data: dict[str, Any]) -> list[str]:
     return results
 
 
+def extract_images_from_responses_payload(data: dict[str, Any]) -> list[str]:
+    output = data.get("output") or []
+    if not isinstance(output, list):
+        fail(
+            "image generation result missing in responses payload:\n"
+            f"{json.dumps(data, ensure_ascii=False, indent=2)}"
+        )
+    results: list[str] = []
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "image_generation_call":
+            continue
+        result = item.get("result")
+        if isinstance(result, str) and result:
+            results.append(result)
+    if not results:
+        fail(
+            "image generation result missing in responses payload:\n"
+            f"{json.dumps(data, ensure_ascii=False, indent=2)}"
+        )
+    return results
+
+
+def extract_responses_metadata(data: dict[str, Any]) -> tuple[str | None, list[str]]:
+    response_id = data.get("id")
+    normalized_response_id = response_id if isinstance(response_id, str) and response_id else None
+    output = data.get("output") or []
+    if not isinstance(output, list):
+        return normalized_response_id, []
+    image_generation_call_ids: list[str] = []
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "image_generation_call":
+            continue
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id:
+            image_generation_call_ids.append(item_id)
+    return normalized_response_id, image_generation_call_ids
+
+
 def effective_model(args_model: str | None, runtime: dict[str, Any]) -> str:
     return args_model or runtime["model"]
+
+
+def effective_transport(args_transport: str | None, runtime: dict[str, Any]) -> str:
+    transport = (args_transport or runtime["transport"]).strip().lower()
+    if transport not in {"images", "responses"}:
+        fail("transport must be one of images or responses")
+    return transport
+
+
+def validate_responses_transport_options(
+    *,
+    fmt: str,
+    compression: int | None,
+    mask_path: Path | None,
+    input_fidelity: str | None,
+) -> None:
+    if fmt != "png":
+        fail("responses transport currently supports png output only")
+    if compression is not None:
+        fail("responses transport currently does not support output compression")
+    if mask_path is not None:
+        fail("responses transport currently does not support mask uploads")
+    if input_fidelity is not None:
+        fail("responses transport currently does not support input-fidelity")
+
+
+def build_responses_tool(
+    *,
+    action: str,
+    size: str,
+    quality: str,
+    background: str,
+    moderation: str,
+    n: int,
+) -> dict[str, Any]:
+    return {
+        "type": "image_generation",
+        "action": action,
+        "size": size,
+        "quality": quality,
+        "background": background,
+        "moderation": moderation,
+        "n": n,
+    }
+
+
+def build_responses_generate_payload(
+    *,
+    model: str,
+    prompt: str,
+    tool: dict[str, Any],
+    previous_response_id: str | None,
+    response_image_id: str | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": model,
+        "tools": [tool],
+    }
+    if previous_response_id:
+        payload["previous_response_id"] = previous_response_id
+    if response_image_id:
+        payload["input"] = [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt}],
+            },
+            {"type": "image_generation_call", "id": response_image_id},
+        ]
+    else:
+        payload["input"] = prompt
+    return payload
+
+
+def build_responses_edit_payload(
+    *,
+    model: str,
+    prompt: str,
+    input_paths: list[Path],
+    tool: dict[str, Any],
+    previous_response_id: str | None,
+    response_image_id: str | None,
+) -> dict[str, Any]:
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+    content.extend(
+        {"type": "input_image", "image_url": encode_image_data_url(path)}
+        for path in input_paths
+    )
+    payload: dict[str, Any] = {
+        "model": model,
+        "tools": [tool],
+        "input": [{"role": "user", "content": content}],
+    }
+    if previous_response_id:
+        payload["previous_response_id"] = previous_response_id
+    if response_image_id:
+        payload["input"].append({"type": "image_generation_call", "id": response_image_id})
+    return payload
 
 
 def common_runtime_values(
@@ -1324,7 +1600,11 @@ def maybe_print_preview(preview: dict[str, Any], *, dry_run: bool) -> bool:
     return True
 
 
-def resolve_edit_inputs(args: argparse.Namespace) -> tuple[list[Path], str]:
+def resolve_edit_inputs(
+    args: argparse.Namespace,
+    *,
+    allow_empty_images: bool = False,
+) -> tuple[list[Path], str]:
     raw_values: list[str] = []
     selector_values: list[str] = list(getattr(args, "image_set", []) or [])
     positional = list(getattr(args, "positional", []) or [])
@@ -1373,7 +1653,7 @@ def resolve_edit_inputs(args: argparse.Namespace) -> tuple[list[Path], str]:
         selected_paths.append(resolve_image_reference(raw))
 
     paths = dedupe_paths(selected_paths)
-    if not paths:
+    if not paths and not allow_empty_images:
         fail("at least one input image is required")
     if len(paths) > IMAGE_MAX_EDIT_IMAGES:
         fail(f"at most {IMAGE_MAX_EDIT_IMAGES} input images are supported for edit")
@@ -1475,6 +1755,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     api_key = ensure_api_key(runtime)
     prompt = read_prompt(args.prompt, args.prompt_file, prompt_flag=args.prompt_flag)
     model = effective_model(args.model, runtime)
+    transport = effective_transport(getattr(args, "transport", None), runtime)
     size, delivery_size, quality, fmt, compression, background, moderation, size_note = common_runtime_values(args, runtime)
     n = args.n
     validate_n(n)
@@ -1492,41 +1773,88 @@ def cmd_generate(args: argparse.Namespace) -> int:
     log(
         "generate start "
         f"base_url={runtime['base_url']} model={model} "
+        f"transport={transport} "
         f"size={size} quality={quality} format={fmt} background={background} "
         f"moderation={moderation} n={n} outputs={len(out_paths)}"
     )
     if size_note:
         log(size_note)
 
-    payload = build_generate_payload(
-        model=model,
-        prompt=augment_prompt_with_size(prompt, delivery_size or size),
-        n=n,
-        size=size,
-        quality=quality,
-        background=background,
-        moderation=moderation,
-        fmt=fmt,
-        compression=compression,
+    prompt = prompt_with_delivery_constraint(
+        prompt,
+        api_size=size,
+        delivery_size=delivery_size,
     )
-    if maybe_print_preview(
-        {
+    if transport == "images":
+        payload = build_generate_payload(
+            model=model,
+            prompt=prompt,
+            n=n,
+            size=size,
+            quality=quality,
+            background=background,
+            moderation=moderation,
+            fmt=fmt,
+            compression=compression,
+        )
+        preview = {
             "endpoint": "/v1/images/generations",
+            "transport": transport,
             "outputs": preview_output_strings(out_paths),
             **payload,
-        },
+        }
+    else:
+        validate_responses_transport_options(
+            fmt=fmt,
+            compression=compression,
+            mask_path=None,
+            input_fidelity=None,
+        )
+        payload = build_responses_generate_payload(
+            model=model,
+            prompt=prompt,
+            tool=build_responses_tool(
+                action="generate",
+                size=size,
+                quality=quality,
+                background=background,
+                moderation=moderation,
+                n=n,
+            ),
+            previous_response_id=getattr(args, "previous_response_id", None),
+            response_image_id=getattr(args, "response_image_id", None),
+        )
+        preview = {
+            "endpoint": "/v1/responses",
+            "transport": transport,
+            "outputs": preview_output_strings(out_paths),
+            **payload,
+        }
+    if maybe_print_preview(
+        preview,
         dry_run=args.dry_run,
     ):
         return 0
 
-    data = post_json(
-        build_api_url(runtime["base_url"], "/images/generations"),
-        api_key,
-        payload,
-        runtime["timeout"],
-    )
+    if transport == "images":
+        data = post_json(
+            build_api_url(runtime["base_url"], "/images/generations"),
+            api_key,
+            payload,
+            runtime["timeout"],
+        )
+        images = extract_images_from_images_payload(data)
+    else:
+        data = post_json(
+            build_api_url(runtime["base_url"], "/responses"),
+            api_key,
+            payload,
+            runtime["timeout"],
+        )
+        images = extract_images_from_responses_payload(data)
+        response_id, image_generation_call_ids = extract_responses_metadata(data)
     written = decode_and_save_many(
-        extract_images_from_images_payload(data),
+        images,
         out_paths,
         force=args.force,
         expected_size=delivery_size,
@@ -1534,6 +1862,17 @@ def cmd_generate(args: argparse.Namespace) -> int:
     thread_id = current_thread_id()
     if thread_id is not None:
         save_last_output_set(thread_id, written)
+        if transport == "responses":
+            save_last_responses_state(
+                thread_id,
+                response_id=response_id,
+                image_generation_call_ids=image_generation_call_ids,
+            )
+    if transport == "responses":
+        if response_id:
+            log(f"responses response_id={response_id}")
+        if image_generation_call_ids:
+            log(f"responses image_generation_call_ids={','.join(image_generation_call_ids)}")
     for path in written:
         log(f"generate saved {path}")
         print(str(path))
@@ -1543,7 +1882,11 @@ def cmd_generate(args: argparse.Namespace) -> int:
 def cmd_edit(args: argparse.Namespace) -> int:
     runtime = resolve_runtime()
     api_key = ensure_api_key(runtime)
-    input_paths, prompt = resolve_edit_inputs(args)
+    transport = effective_transport(getattr(args, "transport", None), runtime)
+    allow_empty_images = transport == "responses" and bool(
+        getattr(args, "previous_response_id", None) or getattr(args, "response_image_id", None)
+    )
+    input_paths, prompt = resolve_edit_inputs(args, allow_empty_images=allow_empty_images)
 
     mask_path = resolve_image_reference(args.mask) if args.mask else None
 
@@ -1553,7 +1896,14 @@ def cmd_edit(args: argparse.Namespace) -> int:
     n = args.n
     validate_n(n)
 
-    stamp = args.name or f"{input_paths[0].stem}-edited"
+    if args.name:
+        stamp = args.name
+    elif input_paths:
+        stamp = f"{input_paths[0].stem}-edited"
+    elif transport == "responses":
+        stamp = "responses-edit"
+    else:
+        fail("at least one input image is required")
     out_paths = resolve_output_paths(
         out_path=args.out,
         out_dir=args.out_dir,
@@ -1566,6 +1916,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
     log(
         "edit start "
         f"base_url={runtime['base_url']} model={model} "
+        f"transport={transport} "
         f"size={size} quality={quality} format={fmt} background={background} "
         f"moderation={moderation} n={n} input_images={len(input_paths)} outputs={len(out_paths)}"
     )
@@ -1574,59 +1925,118 @@ def cmd_edit(args: argparse.Namespace) -> int:
     if size_note:
         log(size_note)
 
-    fields: dict[str, Any] = {
-        "model": model,
-        "prompt": augment_prompt_with_size(prompt, delivery_size or size),
-        "n": n,
-        "size": size,
-        "quality": quality,
-        "background": background,
-        "moderation": moderation,
-        "response_format": "b64_json",
-        "output_format": fmt,
-    }
-    if compression is not None:
-        fields["output_compression"] = compression
-    if args.input_fidelity is not None:
-        fields["input_fidelity"] = args.input_fidelity
+    prompt = prompt_with_delivery_constraint(
+        prompt,
+        api_size=size,
+        delivery_size=delivery_size,
+    )
+    if transport == "images":
+        fields: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "n": n,
+            "size": size,
+            "quality": quality,
+            "background": background,
+            "moderation": moderation,
+            "response_format": "b64_json",
+            "output_format": fmt,
+        }
+        if compression is not None:
+            fields["output_compression"] = compression
+        if args.input_fidelity is not None:
+            fields["input_fidelity"] = args.input_fidelity
 
-    files: list[tuple[str, Path]] = [("image", path) for path in input_paths]
-    if mask_path:
-        files.append(("mask", mask_path))
+        files: list[tuple[str, Path]] = [("image", path) for path in input_paths]
+        if mask_path:
+            files.append(("mask", mask_path))
 
-    preview = dict(fields)
-    preview["image"] = [str(path) for path in input_paths]
-    if mask_path:
-        preview["mask"] = str(mask_path)
+        preview = dict(fields)
+        preview["image"] = [str(path) for path in input_paths]
+        if mask_path:
+            preview["mask"] = str(mask_path)
+        endpoint = "/v1/images/edits"
+        payload = fields
+    else:
+        validate_responses_transport_options(
+            fmt=fmt,
+            compression=compression,
+            mask_path=mask_path,
+            input_fidelity=args.input_fidelity,
+        )
+        payload = build_responses_edit_payload(
+            model=model,
+            prompt=prompt,
+            input_paths=input_paths,
+            tool=build_responses_tool(
+                action="edit",
+                size=size,
+                quality=quality,
+                background=background,
+                moderation=moderation,
+                n=n,
+            ),
+            previous_response_id=getattr(args, "previous_response_id", None),
+            response_image_id=getattr(args, "response_image_id", None),
+        )
+        preview = {
+            **payload,
+            "input_image_paths": [str(path) for path in input_paths],
+        }
+        endpoint = "/v1/responses"
     thread_id = current_thread_id()
     if maybe_print_preview(
         {
-            "endpoint": "/v1/images/edits",
+            "endpoint": endpoint,
+            "transport": transport,
             "outputs": preview_output_strings(out_paths),
             **preview,
         },
         dry_run=args.dry_run,
     ):
-        if thread_id is not None:
+        if thread_id is not None and input_paths:
             save_active_image_set(thread_id, input_paths)
         return 0
 
-    data = post_multipart(
-        build_api_url(runtime["base_url"], "/images/edits"),
-        api_key,
-        fields,
-        files,
-        runtime["timeout"],
-    )
+    if transport == "images":
+        data = post_multipart(
+            build_api_url(runtime["base_url"], "/images/edits"),
+            api_key,
+            fields,
+            files,
+            runtime["timeout"],
+        )
+        images = extract_images_from_images_payload(data)
+    else:
+        data = post_json(
+            build_api_url(runtime["base_url"], "/responses"),
+            api_key,
+            payload,
+            runtime["timeout"],
+        )
+        images = extract_images_from_responses_payload(data)
+        response_id, image_generation_call_ids = extract_responses_metadata(data)
     written = decode_and_save_many(
-        extract_images_from_images_payload(data),
+        images,
         out_paths,
         force=args.force,
         expected_size=delivery_size,
     )
     if thread_id is not None:
-        save_active_image_set(thread_id, input_paths)
+        if input_paths:
+            save_active_image_set(thread_id, input_paths)
         save_last_output_set(thread_id, written)
+        if transport == "responses":
+            save_last_responses_state(
+                thread_id,
+                response_id=response_id,
+                image_generation_call_ids=image_generation_call_ids,
+            )
+    if transport == "responses":
+        if response_id:
+            log(f"responses response_id={response_id}")
+        if image_generation_call_ids:
+            log(f"responses image_generation_call_ids={','.join(image_generation_call_ids)}")
     for path in written:
         log(f"edit saved {path}")
         print(str(path))
@@ -1677,7 +2087,11 @@ def run_batch_job(
 
     payload = build_generate_payload(
         model=model,
-        prompt=augment_prompt_with_size(prompt, delivery_size or size),
+        prompt=prompt_with_delivery_constraint(
+            prompt,
+            api_size=size,
+            delivery_size=delivery_size,
+        ),
         n=n,
         size=size,
         quality=quality,
@@ -1831,9 +2245,24 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--force", action="store_true", help="overwrite existing output files")
     common.add_argument("--dry-run", action="store_true", help="print the request payload without calling the API")
 
+    transport = argparse.ArgumentParser(add_help=False)
+    transport.add_argument(
+        "--transport",
+        choices=("images", "responses"),
+        help="upstream transport: default images API, or explicit responses API for multi-turn image generation state",
+    )
+    transport.add_argument(
+        "--previous-response-id",
+        help="responses API previous_response_id for explicit multi-turn follow-up state",
+    )
+    transport.add_argument(
+        "--response-image-id",
+        help="responses API image_generation_call id to continue refining a specific prior generated image",
+    )
+
     gen = sub.add_parser(
         "generate",
-        parents=[common],
+        parents=[common, transport],
         help="generate a new image",
         prog="codex-image generate",
     )
@@ -1853,7 +2282,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     edit = sub.add_parser(
         "edit",
-        parents=[common],
+        parents=[common, transport],
         help="edit one or more existing images",
         prog="codex-image edit",
     )

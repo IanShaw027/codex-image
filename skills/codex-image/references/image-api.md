@@ -1,10 +1,10 @@
-# Images API quick reference
+# Transport quick reference
 
-This file documents the parameter surface exposed by `scripts/codex_image.py`.
+This file documents the upstream parameter surface exposed by `scripts/codex_image.py`.
 
 ## Endpoints
 
-### Generate
+### Default generate transport
 
 Endpoint:
 
@@ -27,7 +27,7 @@ Payload shape:
 }
 ```
 
-### Edit
+### Default edit transport
 
 Endpoint:
 
@@ -39,6 +39,42 @@ Payload shape:
 - text fields such as `model`, `prompt`, `n`, `size`, `quality`, `background`, `moderation`, `output_format`, `output_compression`, `input_fidelity`
 - one or more uploaded `image` parts
 - optional uploaded `mask`
+
+### Explicit responses transport
+
+Endpoint:
+
+- `POST /v1/responses`
+
+Payload shape used by this skill:
+
+```json
+{
+  "model": "gpt-image-2",
+  "previous_response_id": "resp_123",
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "input_text", "text": "Make it more realistic" },
+        { "type": "input_image", "image_url": "data:image/png;base64,..." }
+      ]
+    },
+    { "type": "image_generation_call", "id": "ig_123" }
+  ],
+  "tools": [
+    {
+      "type": "image_generation",
+      "action": "edit",
+      "size": "1024x1024",
+      "quality": "medium",
+      "background": "auto",
+      "moderation": "auto",
+      "n": 1
+    }
+  ]
+}
+```
 
 ## Supported options in this skill
 
@@ -54,6 +90,9 @@ Payload shape:
 - `output_compression`
 - `input_fidelity` for edits
 - `mask` for edits
+- `transport` for `generate` and `edit`
+- `previous_response_id` for explicit Responses API follow-up state
+- `response_image_id` for explicit Responses API image continuation state
 
 ## Size constraints enforced by the skill
 
@@ -87,3 +126,10 @@ The API `background` parameter is an output transparency control. It is not the 
 - reads `data[].b64_json`
 - decodes base64 and writes the file directly to disk
 - when `n > 1`, writes one file per returned item
+
+For explicit Responses API mode:
+
+- reads `output[].result` from `type == "image_generation_call"`
+- decodes base64 and writes the file directly to disk
+- records the top-level `response_id` plus `image_generation_call` ids for follow-up reuse
+- current implementation keeps Responses support narrow on purpose and still defaults to the Images API
