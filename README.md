@@ -1,10 +1,19 @@
 # codex-image
 
-`codex-image` is a Codex skill for image generation and editing through the OpenAI Images API when Codex is connected in API key mode and the built-in image tool path is unavailable or not being used.
+`codex-image` is a Codex skill for OpenAI Images API generation and editing in API key mode. It gives Codex a local `codex-image` command path for `gpt-image-2`, image generation, image editing, multi-reference edits, batch generation, exact output files, and Codex config discovery.
 
 It keeps the Codex-specific config/output experience that the system `imagegen` skill does not provide, while intentionally narrowing the transport to `/v1/images/generations` and `/v1/images/edits`.
 
 The published skill lives at [`skills/codex-image`](./skills/codex-image).
+
+Suggested GitHub topics: `codex`, `codex-skill`, `image-generation`, `openai`, `openai-images-api`, `gpt-image-2`, `images-api`, `python-cli`.
+
+## Why use codex-image
+
+- It is purpose-built for Codex API key mode when the built-in image tool is unavailable or not being used.
+- It reads Codex-friendly auth and provider settings from environment variables, `$CODEX_HOME/auth.json`, and `$CODEX_HOME/config.toml`.
+- It writes generated or edited images to deterministic local files instead of relying on inline image output.
+- It supports practical delivery sizes, ratio shortcuts, multi-image edits, masks, `input_fidelity`, and JSONL batch generation.
 
 ## What it supports
 
@@ -84,6 +93,7 @@ Model behavior:
 Dependency note:
 
 - `codex-image` itself uses Python standard library only
+- Python 3.11 or newer is required
 - when a related workflow needs Python deps such as the OpenAI SDK, install them into `${CODEX_HOME:-$HOME/.codex}/.venv`
 
 ## Usage

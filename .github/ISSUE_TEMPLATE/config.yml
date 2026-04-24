@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: OpenAI Images API documentation
+    url: https://platform.openai.com/docs/guides/image-generation
+    about: Reference for the underlying Images API behavior.
