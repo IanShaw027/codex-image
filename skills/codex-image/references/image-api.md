@@ -57,6 +57,8 @@ Payload shape:
 
 ## Size constraints enforced by the skill
 
+The Images API receives only direct `WIDTHxHEIGHT` sizes or `auto`. Ratio-tier strings such as `9:16@1k` are local CLI input only and must be normalized before the request is sent. Explicit user-provided `WIDTHxHEIGHT` values are sent unchanged; if the API returns a different pixel size with a close aspect ratio, the CLI resizes the saved file locally to the requested dimensions. Material aspect-ratio mismatches fail instead of being stretched automatically.
+
 - maximum edge length: `3840`
 - width and height must both be divisible by `16`
 - total pixels: `655360` to `8294400`

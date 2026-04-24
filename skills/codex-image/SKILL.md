@@ -80,7 +80,8 @@ Think about two separate questions:
 Intent:
 
 - If the user wants to modify an existing image while preserving parts of it, use `edit`.
-- If the user provides images only as references and does not ask to modify them, use `generate`.
+- If the user provides any input images that the model must see, use `edit` with repeated `--image` arguments, even when the desired result is a new poster or product mockup rather than a localized edit.
+- If the user only describes references in text and provides no image files, use `generate`.
 - If no image is supplied, use `generate`.
 
 Output choice:
@@ -94,8 +95,12 @@ Output choice:
 2. Collect prompt, constraints, exact text, and any input image path.
 3. Normalize the size request:
    - keep valid direct sizes unchanged
-   - convert ratio input like `16:9` to the largest valid direct size under OpenAI constraints
-   - normalize invalid explicit sizes such as `1920x1080` to the nearest valid size before sending
+   - convert ratio input like `16:9` to the largest valid direct size under OpenAI constraints only when no delivery tier is provided
+   - convert ratio plus delivery tier inputs such as `9:16 1k`, `9:16@1k`, or `1k@9:16` into a direct API size before sending; never pass tier syntax to the Images API
+   - pass explicit `WIDTHxHEIGHT` user sizes through unchanged, including non-standard sizes such as `1000x1800`
+   - keep the prompt aligned with the intended final delivery size by stating the final canvas dimensions in the prompt
+   - after saving, verify the returned pixel dimensions; if the size differs but the aspect ratio is close, resize locally to that requested size
+   - if the returned aspect ratio differs materially from the requested aspect ratio, do not stretch automatically; ask the user whether to retry generation, crop to cover, pad to contain, or force stretch
 4. Choose output path:
    - `--out` for an exact path
    - `--out-dir` for multi-image output or batch output
@@ -182,6 +187,9 @@ Notes:
 - Quote exact text and require verbatim rendering when text matters.
 - Repeat invariants for edits.
 - Use direct final sizes when the user asks for an exact delivery size.
+- When the user asks for `1k`, `2k`, or `4k` together with a ratio, pass a ratio-tier size expression to the CLI, for example `--size '9:16@1k'`, so the CLI resolves the API `size` and also adds the resolved canvas size to the prompt.
+- When the user asks for an explicit non-standard size, send that exact `WIDTHxHEIGHT` value to the API and keep it as the final output target. If the returned image dimensions differ, verify and resize the saved file locally.
+- If the returned image has a materially different aspect ratio from the requested final size, stop instead of distorting it. For creative image requests, prefer asking the user whether to let the model retry with stronger size wording or choose a post-processing strategy.
 - Do not crop, pad, or upscale locally just to reach the requested final size.
 - For more examples, use `references/prompting.md` and `references/sample-prompts.md`.
 
