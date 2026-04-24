@@ -48,6 +48,7 @@ Base URL precedence:
 
 ## Python and portability
 
+- prefer the installed launcher under `${CODEX_HOME:-~/.codex}/skills/codex-image/scripts/`; on POSIX invoke it through `bash`, and on Windows use `codex-image.cmd` under `%CODEX_HOME%` or `%USERPROFILE%\.codex`
 - requires Python 3.11 or newer because the script uses `tomllib`
 - uses only Python standard library modules
 - works on macOS, Linux, and Windows without a mandatory virtual environment

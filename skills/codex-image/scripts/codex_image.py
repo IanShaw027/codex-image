@@ -470,9 +470,17 @@ def resolve_runtime() -> dict[str, Any]:
     }
 
 
-def read_prompt(prompt: str | None, prompt_file: str | None) -> str:
-    if prompt and prompt_file:
-        fail("use either prompt or --prompt-file, not both")
+def read_prompt(
+    prompt: str | None,
+    prompt_file: str | None,
+    *,
+    prompt_flag: str | None = None,
+) -> str:
+    supplied_prompt_count = sum(
+        1 for item in (prompt, prompt_file, prompt_flag) if item
+    )
+    if supplied_prompt_count > 1:
+        fail("use only one of positional prompt, --prompt, or --prompt-file")
     if prompt_file:
         path = Path(prompt_file).expanduser()
         if not path.is_file():
@@ -480,6 +488,11 @@ def read_prompt(prompt: str | None, prompt_file: str | None) -> str:
         value = path.read_text(encoding="utf-8").strip()
         if not value:
             fail(f"prompt file is empty: {path}")
+        return value
+    if prompt_flag is not None:
+        value = prompt_flag.strip()
+        if not value:
+            fail("prompt is required")
         return value
     if prompt is None:
         fail("prompt is required")
@@ -1237,7 +1250,10 @@ def resolve_edit_inputs(args: argparse.Namespace) -> tuple[list[Path], str]:
     if getattr(args, "image", None):
         raw_values.extend(args.image)
         if len(positional) > 1:
-            fail("when --image is used, provide prompt as one trailing argument or use --prompt-file")
+            fail(
+                "when --image is used, provide prompt as one trailing argument, "
+                "use --prompt, or use --prompt-file"
+            )
         prompt_arg = positional[0] if positional else None
     else:
         if len(positional) > 2:
@@ -1246,7 +1262,11 @@ def resolve_edit_inputs(args: argparse.Namespace) -> tuple[list[Path], str]:
             raw_values.append(positional[0])
             prompt_arg = positional[1]
         else:
-            prompt_arg = positional[0] if positional else None
+            if positional and (args.prompt_flag is not None or args.prompt_file is not None):
+                raw_values.append(positional[0])
+                prompt_arg = None
+            else:
+                prompt_arg = positional[0] if positional else None
 
     thread_id = current_thread_id()
     selected_paths: list[Path] = []
@@ -1275,7 +1295,7 @@ def resolve_edit_inputs(args: argparse.Namespace) -> tuple[list[Path], str]:
         fail("at least one input image is required")
     if len(paths) > IMAGE_MAX_EDIT_IMAGES:
         fail(f"at most {IMAGE_MAX_EDIT_IMAGES} input images are supported for edit")
-    return paths, read_prompt(prompt_arg, args.prompt_file)
+    return paths, read_prompt(prompt_arg, args.prompt_file, prompt_flag=args.prompt_flag)
 
 
 def normalize_job(job: Any, idx: int) -> dict[str, Any]:
@@ -1357,6 +1377,7 @@ def redirect_generate_args_to_edit(args: argparse.Namespace) -> argparse.Namespa
     redirected.command = "edit"
     redirected.func = cmd_edit
     redirected.positional = [args.prompt] if args.prompt else []
+    redirected.prompt_flag = args.prompt_flag
     redirected.mask = None
     redirected.input_fidelity = None
     redirected.image_set = []
@@ -1370,7 +1391,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return cmd_edit(redirect_generate_args_to_edit(args))
     runtime = resolve_runtime()
     api_key = ensure_api_key(runtime)
-    prompt = read_prompt(args.prompt, args.prompt_file)
+    prompt = read_prompt(args.prompt, args.prompt_file, prompt_flag=args.prompt_flag)
     model = effective_model(args.model, runtime)
     size, delivery_size, quality, fmt, compression, background, moderation, size_note = common_runtime_values(args, runtime)
     n = args.n
@@ -1707,7 +1728,8 @@ def cmd_generate_batch(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate or edit images through an OpenAI-compatible Images API endpoint."
+        description="Generate or edit images through an OpenAI-compatible Images API endpoint.",
+        prog="codex-image",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1727,20 +1749,42 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--force", action="store_true", help="overwrite existing output files")
     common.add_argument("--dry-run", action="store_true", help="print the request payload without calling the API")
 
-    gen = sub.add_parser("generate", parents=[common], help="generate a new image")
+    gen = sub.add_parser(
+        "generate",
+        parents=[common],
+        help="generate a new image",
+        prog="codex-image generate",
+    )
     gen.add_argument(
         "--image",
         action="append",
         help="reference image path or attachment placeholder like [Image #1] or [Last Output]; warns and redirects to edit when provided",
     )
+    gen.add_argument(
+        "--prompt",
+        dest="prompt_flag",
+        metavar="PROMPT",
+        help="explicit prompt text; use this instead of positional prompt when quoting would be awkward",
+    )
     gen.add_argument("prompt", nargs="?", help="generation prompt")
     gen.set_defaults(func=cmd_generate)
 
-    edit = sub.add_parser("edit", parents=[common], help="edit one or more existing images")
+    edit = sub.add_parser(
+        "edit",
+        parents=[common],
+        help="edit one or more existing images",
+        prog="codex-image edit",
+    )
     edit.add_argument(
         "--image",
         action="append",
         help="input image path or Codex attachment placeholder like [Image #1] or [Last Output]; repeat to provide multiple images",
+    )
+    edit.add_argument(
+        "--prompt",
+        dest="prompt_flag",
+        metavar="PROMPT",
+        help="explicit prompt text; use this instead of positional prompt when quoting would be awkward",
     )
     edit.add_argument(
         "--image-set",
@@ -1757,7 +1801,13 @@ def build_parser() -> argparse.ArgumentParser:
     edit.add_argument("positional", nargs="*", help="legacy INPUT_IMAGE PROMPT or prompt when --image is used")
     edit.set_defaults(func=cmd_edit)
 
-    batch = sub.add_parser("generate-batch", parents=[common], help="generate many prompts from a JSONL file")
+    batch = sub.add_parser(
+        "generate-batch",
+        parents=[common],
+        help="generate many prompts from a JSONL file",
+        prog="codex-image generate-batch",
+        allow_abbrev=False,
+    )
     batch.add_argument("--input", required=True, help="JSONL file containing one prompt or job object per line")
     batch.add_argument("--concurrency", type=int, default=DEFAULT_BATCH_CONCURRENCY, help="number of concurrent requests")
     batch.add_argument("--fail-fast", action="store_true", help="stop after the first failed job")

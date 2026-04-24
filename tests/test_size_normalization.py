@@ -1,5 +1,8 @@
 import importlib.util
+import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +12,8 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "skills" / "codex-image"
 SCRIPT_PATH = SKILL_ROOT / "scripts" / "codex_image.py"
+LAUNCHER_PATH = SKILL_ROOT / "scripts" / "codex-image"
+LAUNCHER_CMD_PATH = SKILL_ROOT / "scripts" / "codex-image.cmd"
 OPENAI_YAML_PATH = SKILL_ROOT / "agents" / "openai.yaml"
 SPEC = importlib.util.spec_from_file_location("codex_image", SCRIPT_PATH)
 codex_image = importlib.util.module_from_spec(SPEC)
@@ -24,6 +29,42 @@ class SizeNormalizationTests(unittest.TestCase):
         self.assertIsNotNone(match)
         default_prompt = match.group(1)
         self.assertLessEqual(len(default_prompt), 1024)
+
+    def test_skill_default_prompt_prefers_direct_launcher_over_manual_preflight(self):
+        contents = OPENAI_YAML_PATH.read_text(encoding="utf-8")
+        match = re.search(r'^\s{2}default_prompt:\s+"(.*)"\s*$', contents, re.MULTILINE)
+
+        self.assertIsNotNone(match)
+        default_prompt = match.group(1)
+        self.assertIn("CODEX_HOME", default_prompt)
+        self.assertNotIn("/Users/ianshaw/", default_prompt)
+        self.assertRegex(default_prompt.lower(), r"config.*auth")
+        self.assertRegex(default_prompt.lower(), r"--help")
+        self.assertIn("Codex-thread-only", default_prompt)
+        self.assertIn("outside a thread use real file paths", default_prompt)
+
+    def test_launcher_script_exists_and_execs_codex_image(self):
+        launcher = LAUNCHER_PATH.read_text(encoding="utf-8")
+        launcher_cmd = LAUNCHER_CMD_PATH.read_text(encoding="utf-8")
+
+        self.assertTrue(LAUNCHER_PATH.is_file())
+        self.assertTrue(LAUNCHER_CMD_PATH.is_file())
+        self.assertIn("codex_image.py", launcher)
+        self.assertIn("version_info[:2] >= (3, 11)", launcher)
+        self.assertIn('exec "$selected_python" "$SCRIPT_DIR/codex_image.py" "$@"', launcher)
+        self.assertIn("DisableDelayedExpansion", launcher_cmd)
+        self.assertIn("py -3", launcher_cmd)
+        self.assertIn("version_info[:2] >= (3, 11)", launcher_cmd)
+
+        result = subprocess.run(
+            ["bash", str(LAUNCHER_PATH), "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "CODEX_IMAGE_PYTHON": sys.executable},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Generate or edit images", result.stdout)
 
     def test_plain_ratio_still_maps_to_largest_valid_size(self):
         self.assertEqual(codex_image.normalize_image_size("9:16")[0], "2160x3840")
@@ -108,6 +149,103 @@ class SizeNormalizationTests(unittest.TestCase):
         self.assertIsNone(redirected_args.input_fidelity)
         self.assertEqual(redirected_args.image_set, [])
         self.assertFalse(redirected_args.reset_image_set)
+
+    def test_generate_accepts_explicit_prompt_flag(self):
+        parser = codex_image.build_parser()
+        args = parser.parse_args(["generate", "--prompt", "draw a skyline"])
+
+        self.assertEqual(args.prompt_flag, "draw a skyline")
+
+        with mock.patch.object(codex_image, "resolve_runtime", return_value={
+            "api_key": "key",
+            "base_url": "https://example.com",
+            "model": codex_image.DEFAULT_MODEL,
+            "size": codex_image.DEFAULT_SIZE,
+            "quality": codex_image.DEFAULT_QUALITY,
+            "format": codex_image.DEFAULT_FORMAT,
+            "compression": None,
+            "background": codex_image.DEFAULT_BACKGROUND,
+            "moderation": codex_image.DEFAULT_MODERATION,
+            "timeout": codex_image.DEFAULT_TIMEOUT,
+            "output_dir": tempfile.gettempdir(),
+            "config_path": "/tmp/config.toml",
+            "provider_id": None,
+            "provider_env_key": None,
+        }):
+            with mock.patch.object(codex_image, "maybe_print_preview", return_value=True) as maybe_print_preview:
+                codex_image.cmd_generate(args)
+
+        preview = maybe_print_preview.call_args.args[0]
+        self.assertTrue(preview["prompt"].startswith("draw a skyline"))
+        self.assertIn("1024x1024", preview["prompt"])
+        self.assertIn("Final output constraint", preview["prompt"])
+
+    def test_edit_inputs_accept_explicit_prompt_flag(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "ref.png"
+            image_path.write_bytes(b"png")
+
+            parser = codex_image.build_parser()
+            args = parser.parse_args(
+                ["edit", "--image", str(image_path), "--prompt", "replace only the face"]
+            )
+
+            input_paths, prompt = codex_image.resolve_edit_inputs(args)
+
+        self.assertEqual(input_paths, [image_path.resolve()])
+        self.assertEqual(prompt, "replace only the face")
+
+    def test_edit_legacy_input_image_accepts_prompt_flag(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "ref.png"
+            image_path.write_bytes(b"png")
+
+            parser = codex_image.build_parser()
+            args = parser.parse_args(
+                ["edit", str(image_path), "--prompt", "replace only the face"]
+            )
+
+            input_paths, prompt = codex_image.resolve_edit_inputs(args)
+
+        self.assertEqual(input_paths, [image_path.resolve()])
+        self.assertEqual(prompt, "replace only the face")
+
+    def test_edit_legacy_input_image_accepts_prompt_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "ref.png"
+            prompt_path = Path(tmpdir) / "prompt.txt"
+            image_path.write_bytes(b"png")
+            prompt_path.write_text("replace only the face", encoding="utf-8")
+
+            parser = codex_image.build_parser()
+            args = parser.parse_args(
+                ["edit", str(image_path), "--prompt-file", str(prompt_path)]
+            )
+
+            input_paths, prompt = codex_image.resolve_edit_inputs(args)
+
+        self.assertEqual(input_paths, [image_path.resolve()])
+        self.assertEqual(prompt, "replace only the face")
+
+    def test_read_prompt_rejects_multiple_prompt_sources(self):
+        with self.assertRaises(SystemExit):
+            codex_image.read_prompt("positional", None, prompt_flag="flag")
+        with self.assertRaises(SystemExit):
+            codex_image.read_prompt(None, "/tmp/prompt.txt", prompt_flag="flag")
+        with self.assertRaises(SystemExit):
+            codex_image.read_prompt(None, None, prompt_flag="")
+
+    def test_generate_batch_does_not_accept_prompt_flag(self):
+        parser = codex_image.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["generate-batch", "--input", "jobs.jsonl", "--prompt", "ignored"])
+
+    def test_generate_batch_still_accepts_prompt_file_for_compatibility(self):
+        parser = codex_image.build_parser()
+        args = parser.parse_args(
+            ["generate-batch", "--input", "jobs.jsonl", "--prompt-file", "prompt.txt"]
+        )
+        self.assertEqual(args.prompt_file, "prompt.txt")
 
     def test_attachment_placeholder_resolves_from_current_thread_rollout(self):
         with tempfile.TemporaryDirectory() as tmpdir:

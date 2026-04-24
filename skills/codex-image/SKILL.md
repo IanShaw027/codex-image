@@ -5,14 +5,15 @@ description: Use when generating or editing raster images and the built-in image
 
 # Codex Image Skill
 
-Local saved-file raster image workflow backed by `scripts/codex_image.py` and an OpenAI-compatible Images API.
+Local saved-file raster image workflow backed by `scripts/codex_image.py`, shell launchers, and an OpenAI-compatible Images API.
 
 ## Core rules
 
 - Use built-in/system `imagegen` first only when the current session actually exposes `image_gen`, the user did not ask for saved-file, API, or CLI behavior, and the built-in path has not already failed before producing an image.
 - Use this skill as the fallback when built-in `image_gen` is absent, hidden, unavailable, already ruled out by the user, or failed before producing an image.
 - This skill is CLI-only and Images-API-only. Do not describe it as built-in image support.
-- Use the bundled script path directly. Do not rely on a `codex-image` shell alias and do not create ad hoc SDK runners.
+- Use the installed launcher path directly, not a repo-relative path: on POSIX `bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image"`; on Windows use `%CODEX_HOME%\skills\codex-image\scripts\codex-image.cmd` or `%USERPROFILE%\.codex\skills\codex-image\scripts\codex-image.cmd`.
+- Once this skill is selected, usually run the installed launcher first. Preflight config, auth, or `--help` only when the launcher is missing or its failure still leaves a real decision to make.
 - Do not fall back to SVG, Pillow sketches, screenshots, or one-off scripts unless the user explicitly wants code-native graphics.
 - `OPENAI_BASE_URL` or provider `base_url` must exist in API-key mode.
 
@@ -34,6 +35,7 @@ Local saved-file raster image workflow backed by `scripts/codex_image.py` and an
 
 - If the model must see any real image input, treat the task as `edit`.
 - If the user only describes references in text and provides no image files, treat the task as `generate`.
+- Prefer `--prompt` over a long trailing positional prompt when shell quoting would be awkward.
 - Attachment placeholders and image-set selectors only work inside a Codex thread with `CODEX_THREAD_ID` or `CODEX_SESSION_ID`.
 - In that Codex-thread mode, `[Image #N]` resolves against the most recent attachment-bearing user turn. It is the current turn only when the current turn actually carries attachments.
 - Previous attachment-bearing turns can be referenced as `[Turn -K Image #N]`.
@@ -70,7 +72,7 @@ Local saved-file raster image workflow backed by `scripts/codex_image.py` and an
    - keep explicit `WIDTHxHEIGHT` unchanged
    - convert ratio forms such as `16:9` or `9:16@1k` into direct API sizes
    - preserve the requested final delivery size as the post-save target
-5. Run the bundled CLI.
+5. Run the bundled launcher.
 6. Validate subject, composition, text, and invariants.
 7. Report the final saved path.
 

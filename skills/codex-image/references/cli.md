@@ -1,11 +1,14 @@
-# CLI reference (`scripts/codex_image.py`)
+# CLI reference (`codex-image` launcher -> `codex_image.py`)
 
-Use the bundled script directly:
+Use the installed launcher directly:
 
 ```bash
 export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
-export CODEX_IMAGE="$CODEX_HOME/skills/codex-image/scripts/codex_image.py"
+export CODEX_IMAGE="$CODEX_HOME/skills/codex-image/scripts/codex-image"
 ```
+
+On POSIX, invoke the installed launcher through `bash "$CODEX_IMAGE"` so ZIP-based installs do not depend on the executable bit.
+On Windows, use `%CODEX_HOME%\skills\codex-image\scripts\codex-image.cmd` or `%USERPROFILE%\.codex\skills\codex-image\scripts\codex-image.cmd`.
 
 ## Commands
 
@@ -16,21 +19,24 @@ export CODEX_IMAGE="$CODEX_HOME/skills/codex-image/scripts/codex_image.py"
 ## Common shapes
 
 ```bash
-python3 "$CODEX_IMAGE" generate --size 3840x2160 "Prompt"
-python3 "$CODEX_IMAGE" edit --image ./input.png "Change only X; keep Y unchanged"
-python3 "$CODEX_IMAGE" edit --image '[Image #1]' "Use the most recent attachment-bearing turn in this Codex thread"
-python3 "$CODEX_IMAGE" edit --image '[Turn -1 Image #1]' --image '[Thread Image #3]' "Mix prior-turn and thread-wide references"
-python3 "$CODEX_IMAGE" edit --image-set active "In a Codex thread, explicitly reuse the previous edit input list"
-python3 "$CODEX_IMAGE" edit --image-set last-output "In a Codex thread, continue refining the previous saved result image"
-python3 "$CODEX_IMAGE" edit --image-set active --image-set latest-turn "In a Codex thread, explicitly merge the previous input list with the latest attachment-bearing turn"
-python3 "$CODEX_IMAGE" edit --image '[Turn -1 Image #1]' --image '[Turn -1 Image #2]' --image '[Image #1]' "After a follow-up with one new attachment, carry forward the prior two images plus the new one"
-python3 "$CODEX_IMAGE" edit --image '[Last Output]' --image '[Image #1]' "Refine the last result image and use the current upload as a new realism/style reference"
-python3 "$CODEX_IMAGE" generate-batch --input ./prompts.jsonl --out-dir ./output/batch
+bash "$CODEX_IMAGE" generate --size 3840x2160 "Prompt"
+bash "$CODEX_IMAGE" generate --size 3840x2160 --prompt "Prompt when shell quoting is awkward"
+bash "$CODEX_IMAGE" edit --image ./input.png "Change only X; keep Y unchanged"
+bash "$CODEX_IMAGE" edit --image ./input.png --prompt "Change only X; keep Y unchanged"
+bash "$CODEX_IMAGE" edit --image '[Image #1]' "Use the most recent attachment-bearing turn in this Codex thread"
+bash "$CODEX_IMAGE" edit --image '[Turn -1 Image #1]' --image '[Thread Image #3]' "Mix prior-turn and thread-wide references"
+bash "$CODEX_IMAGE" edit --image-set active "In a Codex thread, explicitly reuse the previous edit input list"
+bash "$CODEX_IMAGE" edit --image-set last-output "In a Codex thread, continue refining the previous saved result image"
+bash "$CODEX_IMAGE" edit --image-set active --image-set latest-turn "In a Codex thread, explicitly merge the previous input list with the latest attachment-bearing turn"
+bash "$CODEX_IMAGE" edit --image '[Turn -1 Image #1]' --image '[Turn -1 Image #2]' --image '[Image #1]' "After a follow-up with one new attachment, carry forward the prior two images plus the new one"
+bash "$CODEX_IMAGE" edit --image '[Last Output]' --image '[Image #1]' "Refine the last result image and use the current upload as a new realism/style reference"
+bash "$CODEX_IMAGE" generate-batch --input ./prompts.jsonl --out-dir ./output/batch
 ```
 
 ## Key rules
 
 - If the model must see any real image input, use `edit`.
+- After this skill is selected, usually invoke the installed launcher first and let it own runtime, auth, and attachment validation. Reach for config/auth or `--help` only when the launcher is missing or its failure still needs interpretation.
 - `generate --image` emits a warning and is rerouted to `edit`.
 - `--image '[Image #N]'` resolves against the most recent attachment-bearing user turn, not necessarily the current turn or the most recent text-only user message.
 - `--image '[Turn -K Image #N]'` resolves against the `K`th previous attachment-bearing user turn.
@@ -60,6 +66,7 @@ python3 "$CODEX_IMAGE" generate-batch --input ./prompts.jsonl --out-dir ./output
 - `--out-dir <directory>`
 - `--name <readable-prefix>`
 - `--prompt-file <path>`
+- `--prompt <text>` for `generate` and `edit`
 - `--dry-run`
 - `--force`
 - `--image <path>` repeated for `edit`

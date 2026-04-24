@@ -1,6 +1,6 @@
 # codex-image
 
-`codex-image` is a Codex skill for OpenAI Images API generation and editing in API key mode. It gives Codex a local `codex-image` command path for `gpt-image-2`, image generation, image editing, multi-reference edits, batch generation, exact output files, and Codex config discovery.
+`codex-image` is a Codex skill for OpenAI Images API generation and editing in API key mode. It gives Codex installed launcher paths for `gpt-image-2`, image generation, image editing, multi-reference edits, batch generation, exact output files, and Codex config discovery.
 
 It keeps the Codex-specific config/output experience that the system `imagegen` skill does not provide, while intentionally narrowing the transport to `/v1/images/generations` and `/v1/images/edits`.
 
@@ -101,7 +101,7 @@ Dependency note:
 Generate a 4K image directly:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" generate \
+bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" generate \
   --model gpt-image-2 \
   --size 3840x2160 \
   "Draw a Doraemon-inspired large language model infographic, image only, no text"
@@ -110,7 +110,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" 
 Generate from an aspect ratio:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" generate \
+bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" generate \
   --size 16:9 \
   "Draw a clean futuristic AI wallpaper"
 ```
@@ -118,7 +118,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" 
 Generate from a ratio tier:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" generate \
+bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" generate \
   --size '9:16@1k' \
   "Create a vertical mobile livestream screenshot mockup"
 ```
@@ -126,7 +126,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" 
 Generate with an explicit non-standard delivery size:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" generate \
+bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" generate \
   --size 1000x1800 \
   "Create a vertical promotional poster"
 ```
@@ -134,16 +134,16 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" 
 Edit:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" edit \
+bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" edit \
   --model gpt-image-2 \
   --image ./input.png \
-  "Keep the subject and change the background to a bright blue futuristic scene"
+  --prompt "Keep the subject and change the background to a bright blue futuristic scene"
 ```
 
 Edit with a mask:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" edit \
+bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" edit \
   --image ./input.png \
   --mask ./mask.png \
   --input-fidelity high \
@@ -153,7 +153,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" 
 Create a new promotional image from multiple input references:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" edit \
+bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" edit \
   --image ./person.png \
   --image ./bag.png \
   --size 16:9 \
@@ -161,12 +161,12 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" 
 ```
 
 Use `edit`, not `generate`, whenever image files are provided for the model to see. Multiple input files are sent as repeated multipart `image` fields.
-The `generate` subcommand rejects `--image` to prevent accidentally converting image-reference tasks into text-only prompts.
+If `generate` is called with `--image`, the CLI warns and reroutes the request to `edit`.
 
 Generate multiple variants from one prompt:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" generate \
+bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" generate \
   --size 16:9 \
   --n 3 \
   --out-dir ./output/variants \
@@ -176,10 +176,12 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" 
 Batch generate from JSONL:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex_image.py" generate-batch \
+bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" generate-batch \
   --input ./prompts.jsonl \
   --out-dir ./output/batch
 ```
+
+The POSIX launcher auto-selects a usable Python 3.11+ interpreter from a small known list or `CODEX_IMAGE_PYTHON`; invoke it through `bash` so ZIP-based installs do not depend on the executable bit. On Windows, use `codex-image.cmd`, which accepts `%CODEX_HOME%\skills\codex-image\scripts\codex-image.cmd` or `%USERPROFILE%\.codex\skills\codex-image\scripts\codex-image.cmd`. Once Codex routes into this skill, usually run the launcher first and let the script report missing credentials or unsupported runtime details; reach for config/auth files or `--help` only when the launcher is missing or its failure still leaves the command shape unclear.
 
 ## Output paths
 
