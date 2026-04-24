@@ -11,11 +11,14 @@ pick_python() {
     candidates+=("${CODEX_IMAGE_PYTHON}")
   fi
   candidates+=(
+    /opt/homebrew/bin/python3.13
+    python3.13
     /opt/homebrew/bin/python3.12
     python3.12
     /opt/homebrew/bin/python3.11
     python3.11
     python3
+    python
   )
 
   for candidate in "${candidates[@]}"; do

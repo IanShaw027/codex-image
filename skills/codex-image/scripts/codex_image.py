@@ -502,6 +502,88 @@ def read_prompt(
     return value
 
 
+def looks_like_pathish_prompt(value: str) -> bool:
+    candidate = value.strip()
+    if not candidate:
+        return False
+    path = Path(candidate).expanduser()
+    if path.is_file():
+        return True
+    if any(sep in candidate for sep in (os.sep, "/", "\\")):
+        return True
+    if candidate.startswith(("~", ".")):
+        return True
+    suffix = path.suffix.lower()
+    return suffix in {".txt", ".md", ".prompt"}
+
+
+def normalize_legacy_cli_args(argv: list[str]) -> list[str]:
+    if not argv:
+        return argv
+
+    command = argv[0]
+    if command not in {"generate", "edit"}:
+        return argv
+
+    normalized: list[str] = [command]
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+
+        if token.startswith("--prompt-file="):
+            normalized.append(token)
+            i += 1
+            continue
+
+        if token == "--prompt-file":
+            normalized.append(token)
+            if i + 1 < len(argv):
+                normalized.append(argv[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+
+        if token.startswith("--prompt="):
+            value = token.split("=", 1)[1]
+            if looks_like_pathish_prompt(value):
+                normalized.extend(["--prompt-file", value])
+            else:
+                normalized.append(token)
+            i += 1
+            continue
+
+        if token == "--prompt":
+            if i + 1 < len(argv) and looks_like_pathish_prompt(argv[i + 1]):
+                normalized.extend(["--prompt-file", argv[i + 1]])
+                i += 2
+                continue
+            normalized.append(token)
+            if i + 1 < len(argv):
+                normalized.append(argv[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+
+        if token.startswith("--prom") and "--prompt-file".startswith(token):
+            normalized.append("--prompt-file")
+            if "=" in token:
+                normalized.append(token.split("=", 1)[1])
+                i += 1
+            elif i + 1 < len(argv):
+                normalized.append(argv[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+
+        normalized.append(token)
+        i += 1
+
+    return normalized
+
+
 def random_suffix(length: int = 8) -> str:
     return uuid.uuid4().hex[:length]
 
@@ -1654,7 +1736,7 @@ def cmd_generate_batch(args: argparse.Namespace) -> int:
         "n": args.n,
     }
     validate_n(int(defaults["n"]))
-    output_dir = Path(args.out_dir).expanduser()
+    output_dir = Path(args.out_dir or runtime["output_dir"]).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.dry_run:
@@ -1818,7 +1900,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(normalize_legacy_cli_args(sys.argv[1:]))
     return args.func(args)
 
 

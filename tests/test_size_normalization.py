@@ -51,10 +51,13 @@ class SizeNormalizationTests(unittest.TestCase):
         self.assertTrue(LAUNCHER_CMD_PATH.is_file())
         self.assertIn("codex_image.py", launcher)
         self.assertIn("version_info[:2] >= (3, 11)", launcher)
+        self.assertIn("python3.13", launcher)
+        self.assertIn("python", launcher)
         self.assertIn('exec "$selected_python" "$SCRIPT_DIR/codex_image.py" "$@"', launcher)
         self.assertIn("DisableDelayedExpansion", launcher_cmd)
         self.assertIn("py -3", launcher_cmd)
-        self.assertIn("version_info[:2] >= (3, 11)", launcher_cmd)
+        self.assertIn('"%CODEX_IMAGE_PYTHON%" "%SCRIPT_DIR%codex_image.py" %*', launcher_cmd)
+        self.assertNotIn("shift", launcher_cmd)
 
         result = subprocess.run(
             ["bash", str(LAUNCHER_PATH), "--help"],
@@ -150,6 +153,28 @@ class SizeNormalizationTests(unittest.TestCase):
         self.assertEqual(redirected_args.image_set, [])
         self.assertFalse(redirected_args.reset_image_set)
 
+    def test_generate_redirect_preserves_prompt_flag(self):
+        parser = codex_image.build_parser()
+        args = parser.parse_args(["generate", "--image", "ref.png", "--prompt", "prompt text"])
+
+        with mock.patch.object(codex_image, "cmd_edit", return_value=0) as cmd_edit:
+            codex_image.cmd_generate(args)
+
+        redirected_args = cmd_edit.call_args.args[0]
+        self.assertEqual(redirected_args.prompt_flag, "prompt text")
+        self.assertEqual(redirected_args.positional, [])
+
+    def test_generate_redirect_preserves_prompt_file(self):
+        parser = codex_image.build_parser()
+        args = parser.parse_args(["generate", "--image", "ref.png", "--prompt-file", "prompt.txt"])
+
+        with mock.patch.object(codex_image, "cmd_edit", return_value=0) as cmd_edit:
+            codex_image.cmd_generate(args)
+
+        redirected_args = cmd_edit.call_args.args[0]
+        self.assertEqual(redirected_args.prompt_file, "prompt.txt")
+        self.assertEqual(redirected_args.positional, [])
+
     def test_generate_accepts_explicit_prompt_flag(self):
         parser = codex_image.build_parser()
         args = parser.parse_args(["generate", "--prompt", "draw a skyline"])
@@ -235,6 +260,31 @@ class SizeNormalizationTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             codex_image.read_prompt(None, None, prompt_flag="")
 
+    def test_normalize_legacy_cli_args_rewrites_prompt_file_compat_shapes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prompt_path = Path(tmpdir) / "prompt.txt"
+            prompt_path.write_text("prompt from file", encoding="utf-8")
+
+            exact = codex_image.normalize_legacy_cli_args(
+                ["generate", "--prompt", str(prompt_path)]
+            )
+            prefix = codex_image.normalize_legacy_cli_args(
+                ["generate", "--prom", str(prompt_path)]
+            )
+            equals = codex_image.normalize_legacy_cli_args(
+                [f"generate", f"--prompt={prompt_path}"]
+            )
+
+        self.assertEqual(exact, ["generate", "--prompt-file", str(prompt_path)])
+        self.assertEqual(prefix, ["generate", "--prompt-file", str(prompt_path)])
+        self.assertEqual(equals, ["generate", "--prompt-file", str(prompt_path)])
+
+    def test_normalize_legacy_cli_args_keeps_literal_prompt_text(self):
+        normalized = codex_image.normalize_legacy_cli_args(
+            ["generate", "--prompt", "draw a skyline"]
+        )
+        self.assertEqual(normalized, ["generate", "--prompt", "draw a skyline"])
+
     def test_generate_batch_does_not_accept_prompt_flag(self):
         parser = codex_image.build_parser()
         with self.assertRaises(SystemExit):
@@ -246,6 +296,47 @@ class SizeNormalizationTests(unittest.TestCase):
             ["generate-batch", "--input", "jobs.jsonl", "--prompt-file", "prompt.txt"]
         )
         self.assertEqual(args.prompt_file, "prompt.txt")
+
+    def test_generate_batch_dry_run_allows_job_level_out_without_out_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs_path = Path(tmpdir) / "jobs.jsonl"
+            out_path = Path(tmpdir) / "result.png"
+            jobs_path.write_text(
+                '{"prompt":"theme concept","out":"' + str(out_path) + '"}\n',
+                encoding="utf-8",
+            )
+
+            parser = codex_image.build_parser()
+            args = parser.parse_args(
+                ["generate-batch", "--input", str(jobs_path), "--dry-run"]
+            )
+
+            with mock.patch.object(
+                codex_image,
+                "resolve_runtime",
+                return_value={
+                    "api_key": "key",
+                    "base_url": "https://example.com",
+                    "model": codex_image.DEFAULT_MODEL,
+                    "size": codex_image.DEFAULT_SIZE,
+                    "quality": codex_image.DEFAULT_QUALITY,
+                    "format": codex_image.DEFAULT_FORMAT,
+                    "compression": None,
+                    "background": codex_image.DEFAULT_BACKGROUND,
+                    "moderation": codex_image.DEFAULT_MODERATION,
+                    "timeout": codex_image.DEFAULT_TIMEOUT,
+                    "output_dir": tmpdir,
+                    "config_path": "/tmp/config.toml",
+                    "provider_id": None,
+                    "provider_env_key": None,
+                },
+            ):
+                with mock.patch("builtins.print") as mock_print:
+                    codex_image.cmd_generate_batch(args)
+
+        printed = mock_print.call_args.args[0]
+        self.assertIn(str(out_path), printed)
+        self.assertIn('"endpoint": "/v1/images/generations"', printed)
 
     def test_attachment_placeholder_resolves_from_current_thread_rollout(self):
         with tempfile.TemporaryDirectory() as tmpdir:
