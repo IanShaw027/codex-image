@@ -27,6 +27,12 @@ Payload shape:
 }
 ```
 
+Best for:
+
+- one-shot text-to-image
+- exact output size and format control
+- simple saved-file generation
+
 ### Default edit transport
 
 Endpoint:
@@ -39,6 +45,13 @@ Payload shape:
 - text fields such as `model`, `prompt`, `n`, `size`, `quality`, `background`, `moderation`, `output_format`, `output_compression`, `input_fidelity`
 - one or more uploaded `image` parts
 - optional uploaded `mask`
+
+Best for:
+
+- one-shot image edit
+- multi-reference synthesis
+- masked local edits
+- workflows where local file paths are explicit
 
 ### Explicit responses transport
 
@@ -76,6 +89,12 @@ Payload shape used by this skill:
 }
 ```
 
+Best for:
+
+- explicit prior-response continuation
+- explicit image-generation-call continuation
+- multi-turn state only when the caller really needs it
+
 ## Supported options in this skill
 
 - `model`
@@ -93,6 +112,23 @@ Payload shape used by this skill:
 - `transport` for `generate` and `edit`
 - `previous_response_id` for explicit Responses API follow-up state
 - `response_image_id` for explicit Responses API image continuation state
+
+## Scenario mapping
+
+- Simple one-shot generation:
+  - use default generate transport
+- Generation with exact format/compression:
+  - use default generate transport
+- One-shot local edit:
+  - use default edit transport
+- Multi-reference merge:
+  - use default edit transport
+- Masked edit:
+  - use default edit transport
+- Prior response continuation:
+  - use explicit responses transport
+- Batch JSONL fan-out:
+  - use local `generate-batch`, which still fans into generation-style upstream requests
 
 ## Size constraints enforced by the skill
 

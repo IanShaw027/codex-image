@@ -1,8 +1,17 @@
 # codex-image
 
-`codex-image` is a Codex skill for OpenAI Images API generation and editing in API key mode. It gives Codex installed launcher paths for `gpt-image-2`, image generation, image editing, multi-reference edits, batch generation, exact output files, and Codex config discovery.
+`codex-image` is a Codex skill for local saved-file image generation and editing.
+It gives Codex installed launcher paths, exact output-file control, batch jobs,
+explicit thread image references, and API-key-mode HTTP access for OpenAI-
+compatible image endpoints.
 
-It keeps the Codex-specific config/output experience that the system `imagegen` skill does not provide, while intentionally narrowing the transport to `/v1/images/generations` and `/v1/images/edits`.
+It is not a replacement for the built-in/system `imagegen` runtime tool.
+Instead, the two paths are intentionally split:
+
+- built-in `imagegen` for native current-turn image context and the fastest
+  normal image conversation flow
+- `codex-image` for local files, exact output paths/sizes, API key mode, batch
+  jobs, and explicit image reuse semantics
 
 The published skill lives at [`skills/codex-image`](./skills/codex-image).
 
@@ -14,27 +23,52 @@ Suggested GitHub topics: `codex`, `codex-skill`, `image-generation`, `openai`, `
 - It reads Codex-friendly auth and provider settings from environment variables, `$CODEX_HOME/auth.json`, and `$CODEX_HOME/config.toml`.
 - It writes generated or edited images to deterministic local files instead of relying on inline image output.
 - It supports practical delivery sizes, ratio shortcuts, multi-image edits, masks, `input_fidelity`, and JSONL batch generation.
+- It supports explicit thread-local reuse such as `[Last Output]`, `[Turn -K Image #N]`, and `--image-set ...`.
 
 ## What it supports
 
-- `generate`: create a new text-prompt-only image through `/v1/images/generations`
-- `edit`: edit or synthesize from one or more local input images through `/v1/images/edits`
+- `generate`: create a new image, defaulting to `POST /v1/images/generations`
+- `edit`: edit or synthesize from one or more input images, defaulting to `POST /v1/images/edits`
 - `generate-batch`: run many generation jobs from a JSONL file
+- Explicit `POST /v1/responses` fallback via `--transport responses` for prior-response image state
 - Config and auth discovery from `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `$CODEX_HOME/auth.json`, and `$CODEX_HOME/config.toml`
 - Direct size requests, including explicit non-standard values such as `1000x1800`
 - Ratio-style input such as `16:9`, `9:16`, and `6:16`, normalized into valid image sizes
 - Ratio-tier input such as `9:16@1k`, `9:16@2k`, and `9:16@4k`, resolved before calling the API
 - Multi-image reference/edit requests, optional edit mask, and `input_fidelity`
+- Thread-aware explicit image reuse through placeholders and image sets
 - Saved-output dimension verification with safe post-processing for close aspect-ratio mismatches
 - Multi-image output with `--n`
 - Cross-platform scripts for macOS, Linux, and Windows
 
 ## Positioning
 
-- Use the built-in/system `imagegen` skill first when Codex can access the built-in image tool.
-- Use `codex-image` when Codex is in API key mode and the built-in image tool is unavailable, or when the user explicitly wants the local script path with Codex config/output conventions.
-- This skill is Images API only. It does not implement `Responses + image_generation`.
-- This skill returns saved files on disk. It does not provide inline built-in image output.
+- Use built-in/system `imagegen` first when the user wants the normal native
+  image conversation path:
+  - current-turn image context
+  - fastest simple generate/edit
+  - natural multi-turn continuation
+- Use `codex-image` when the user wants:
+  - local saved files
+  - exact output path or output directory
+  - API key mode
+  - custom `OPENAI_BASE_URL`
+  - batch jobs
+  - explicit image reuse such as `[Last Output]`
+- `codex-image` returns saved files on disk. It does not provide native built-in
+  inline image output.
+- `codex-image` can approximate thread-aware image reuse, but it is still a
+  local skill workflow rather than a runtime-native image tool.
+
+For the full architectural comparison, see
+[docs/image-workflows.md](./docs/image-workflows.md).
+
+That document now also includes:
+
+- concrete request-shape-to-scenario mapping
+- when to use built-in `imagegen`
+- when to use `codex-image`
+- why some flows are better in one path than the other
 
 ## Install
 
@@ -87,7 +121,9 @@ Optional environment variables:
 Model behavior:
 
 - `CODEX_IMAGE_MODEL` is the Images API model, such as `gpt-image-2`
-- This skill no longer uses a separate Responses model layer
+- The default transport is the Images API
+- An explicit Responses transport is available when prior response image state
+  is part of the task
 - In API key mode, `OPENAI_BASE_URL` or an equivalent provider `base_url` is required
 
 Dependency note:
@@ -163,6 +199,15 @@ bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" edit \
 Use `edit`, not `generate`, whenever image files are provided for the model to see. Multiple input files are sent as repeated multipart `image` fields.
 If `generate` is called with `--image`, the CLI warns and reroutes the request to `edit`.
 
+Continue refining a prior response explicitly:
+
+```bash
+bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" edit \
+  --transport responses \
+  --previous-response-id resp_123 \
+  --prompt "Keep the composition and make it more realistic"
+```
+
 Generate multiple variants from one prompt:
 
 ```bash
@@ -220,8 +265,9 @@ Run the repo tests from the repository root:
 ## Skill docs
 
 - Main skill entry: [`skills/codex-image/SKILL.md`](./skills/codex-image/SKILL.md)
+- Workflow comparison: [`docs/image-workflows.md`](./docs/image-workflows.md)
 - CLI reference: [`skills/codex-image/references/cli.md`](./skills/codex-image/references/cli.md)
-- Route parameter reference: [`skills/codex-image/references/image-api.md`](./skills/codex-image/references/image-api.md)
+- Transport parameter reference: [`skills/codex-image/references/image-api.md`](./skills/codex-image/references/image-api.md)
 - Prompt guidance: [`skills/codex-image/references/prompting.md`](./skills/codex-image/references/prompting.md)
 - Sample prompts: [`skills/codex-image/references/sample-prompts.md`](./skills/codex-image/references/sample-prompts.md)
 - Runtime/auth notes: [`skills/codex-image/references/codex-network.md`](./skills/codex-image/references/codex-network.md)
