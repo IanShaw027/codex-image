@@ -57,12 +57,15 @@ Do not add:
 - Do not assume every provided image is a base image to modify; some inputs may be role references, product references, style references, or masks.
 - For multi-image edits, label each input role clearly, for example `Input image 1 role: person reference` and `Input image 2 role: product reference`.
 - Restate what must stay fixed from each input image.
+- In Codex-thread attachment flows, `[Image #N]` only addresses the most recent attachment-bearing user turn. After a follow-up that adds one new image, use `[Image #1]` for that new image and switch older images to `[Turn -1 Image #N]`, `[Thread Image #N]`, or explicit `--image-set`.
+- Prefer direct invocation of `python3 "$CODEX_IMAGE"` or the full bundled script path. Do not rely on a `codex-image` shell alias being present.
 
 ## Iteration
 
 - Start with a clean base prompt.
 - Change one thing at a time on follow-up iterations.
 - Re-state the must-keep constraints every time.
+- In follow-up turns that add new attachment images, restate the role of every carried-forward image explicitly so the command shape stays stable.
 
 ## Suggested shared schema
 

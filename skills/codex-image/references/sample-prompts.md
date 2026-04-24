@@ -72,6 +72,42 @@ Constraints: change only the background; keep the subject, silhouette, pose, and
 Avoid: extra props, style drift, altered face
 ```
 
+### Multi-turn realism follow-up with one new attachment
+
+Command shape:
+
+```bash
+python3 "$CODEX_IMAGE" edit \
+  --image '[Turn -1 Image #1]' \
+  --image '[Turn -1 Image #2]' \
+  --image '[Image #1]' \
+  "Use the second image as the base composition and pose. Replace the subject with the person from the first image. Use the new current-turn image only as a realism and skin-texture reference. Keep the base framing, wardrobe, lighting, hand pose, body angle, and background from image 2, while preserving the identity and recognizable facial structure from image 1."
+```
+
+Why this shape:
+
+- Previous turn image 1: person identity reference
+- Previous turn image 2: target base scene
+- Current turn image 1: new realism reference
+- Do not rewrite this as `[Image #1]`, `[Image #2]`, `[Image #3]` after only one new upload
+
+### Refine the previous result image
+
+Command shape:
+
+```bash
+python3 "$CODEX_IMAGE" edit \
+  --image-set last-output \
+  --image '[Image #1]' \
+  "Use the previous saved result image as the base to refine. Keep its overall composition and subject placement, but use the new current-turn image only as a realism reference for face detail, skin texture, and lighting cleanup."
+```
+
+Why this shape:
+
+- `last-output`: the previous generated result image you want to keep refining
+- Current turn image 1: new correction or realism reference
+- In the prompt, explicitly say the last output is the base result to refine, and the new image is only a supporting reference
+
 ### Text cleanup
 
 ```text

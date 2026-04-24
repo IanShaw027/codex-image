@@ -40,10 +40,26 @@ IMAGE_MAX_PIXELS = 8_294_400
 IMAGE_MAX_RATIO = 3.0
 IMAGE_MAX_N = 10
 IMAGE_MAX_EDIT_IMAGES = 16
+ROLLOUT_MAX_BYTES = 8 * 1024 * 1024
+THREAD_ATTACHMENT_MAX_TURNS = 256
+THREAD_ATTACHMENT_MAX_IMAGES = 1024
 OUTPUT_RESIZE_MAX_RATIO_DELTA = 0.05
 SIZE_DIMENSION_PATTERN = re.compile(r"^\s*(\d+)\s*[xX×]\s*(\d+)\s*$")
 SIZE_RATIO_PATTERN = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*$")
 SIZE_TIER_PATTERN = re.compile(r"^\s*([1-9]\d*)\s*[kK]\s*$")
+ATTACHMENT_PLACEHOLDER_PATTERN = re.compile(r"^\s*\[Image\s*#\s*(\d+)\]\s*$", re.IGNORECASE)
+TURN_ATTACHMENT_PLACEHOLDER_PATTERN = re.compile(
+    r"^\s*\[Turn\s*(-\d+)\s+Image\s*#\s*(\d+)\]\s*$",
+    re.IGNORECASE,
+)
+THREAD_ATTACHMENT_PLACEHOLDER_PATTERN = re.compile(
+    r"^\s*\[Thread\s+Image\s*#\s*(\d+)\]\s*$",
+    re.IGNORECASE,
+)
+LAST_OUTPUT_PLACEHOLDER_PATTERN = re.compile(
+    r"^\s*\[Last\s+Output(?:\s*#\s*(\d+)\s*)?\]\s*$",
+    re.IGNORECASE,
+)
 SIZE_RATIO_TIER_PATTERN = re.compile(
     r"^\s*(?:(\d+\s*:\s*\d+)\s*(?:@|,|\s+)\s*([1-9]\d*\s*[kK])|"
     r"([1-9]\d*\s*[kK])\s*(?:@|,|\s+)\s*(\d+\s*:\s*\d+))\s*$"
@@ -78,7 +94,15 @@ def default_output_dir() -> str:
         or os.environ.get("CODEX_SESSION_ID")
         or "manual"
     )
-    return str(codex_home / "generated_images" / sanitize_path_segment(thread_id))
+    return str(thread_output_dir(thread_id))
+
+
+def codex_home_dir() -> Path:
+    return Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+
+
+def thread_output_dir(thread_id: str) -> Path:
+    return codex_home_dir() / "generated_images" / sanitize_path_segment(thread_id)
 
 
 def validate_image_size(width: int, height: int) -> str | None:
@@ -338,8 +362,7 @@ def validate_batch_concurrency(value: int) -> None:
 
 
 def load_codex_config() -> tuple[dict[str, Any], Path]:
-    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    config_path = Path(os.environ.get("CODEX_CONFIG", codex_home / "config.toml")).expanduser()
+    config_path = Path(os.environ.get("CODEX_CONFIG", codex_home_dir() / "config.toml")).expanduser()
     if not config_path.exists():
         return {}, config_path
     try:
@@ -349,8 +372,7 @@ def load_codex_config() -> tuple[dict[str, Any], Path]:
 
 
 def load_codex_auth_api_key() -> str | None:
-    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    auth_path = Path(os.environ.get("CODEX_AUTH_FILE", codex_home / "auth.json")).expanduser()
+    auth_path = Path(os.environ.get("CODEX_AUTH_FILE", codex_home_dir() / "auth.json")).expanduser()
     if not auth_path.exists():
         return None
     try:
@@ -474,6 +496,425 @@ def random_suffix(length: int = 8) -> str:
 def ensure_parent(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def current_thread_id() -> str | None:
+    thread_id = os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID")
+    if not thread_id:
+        return None
+    normalized = thread_id.strip()
+    return normalized or None
+
+
+def active_image_set_path(thread_id: str) -> Path:
+    return thread_output_dir(thread_id) / "active_image_set.json"
+
+
+def last_output_set_path(thread_id: str) -> Path:
+    return thread_output_dir(thread_id) / "last_output_set.json"
+
+
+def find_thread_rollout_path(thread_id: str) -> Path:
+    sessions_dir = codex_home_dir() / "sessions"
+    matches = sorted(sessions_dir.rglob(f"rollout-*-{thread_id}.jsonl"))
+    if not matches:
+        fail(f"could not find Codex session rollout for thread {thread_id}")
+    return matches[-1]
+
+
+def resolve_existing_path(
+    raw: str,
+    *,
+    base_dir: Path | None = None,
+    allow_cwd_fallback: bool = True,
+    allow_raw_relative_path: bool = True,
+) -> Path | None:
+    path = Path(raw).expanduser()
+    candidates: list[Path] = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        if base_dir is not None:
+            candidates.append((base_dir / path).expanduser())
+        if allow_cwd_fallback:
+            candidates.append((Path.cwd() / path).expanduser())
+        if allow_raw_relative_path:
+            candidates.append(path)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def resolve_rollout_path(raw: str, *, rollout_cwd: Path | None) -> Path | None:
+    return resolve_existing_path(
+        raw,
+        base_dir=rollout_cwd,
+        allow_cwd_fallback=False,
+        allow_raw_relative_path=False,
+    )
+
+
+def flatten_thread_attachments(
+    attachment_turns: list[tuple[list[str], Path | None]],
+) -> list[tuple[str, Path | None]]:
+    flattened: list[tuple[str, Path | None]] = []
+    for images, rollout_cwd in attachment_turns:
+        for image in images:
+            flattened.append((image, rollout_cwd))
+            if len(flattened) > THREAD_ATTACHMENT_MAX_IMAGES:
+                fail(
+                    "thread attachment history is too large to index safely "
+                    f"(max {THREAD_ATTACHMENT_MAX_IMAGES} attachment(s))"
+                )
+    return flattened
+
+
+def read_thread_attachment_turns(thread_id: str) -> list[tuple[list[str], Path | None]]:
+    rollout_path = find_thread_rollout_path(thread_id)
+    try:
+        if rollout_path.stat().st_size > ROLLOUT_MAX_BYTES:
+            fail(
+                "Codex session rollout is too large to scan safely for attachment placeholders "
+                f"({rollout_path.stat().st_size} bytes > {ROLLOUT_MAX_BYTES} byte limit)"
+            )
+    except OSError as exc:
+        fail(f"failed to inspect rollout file {rollout_path}: {exc}")
+
+    default_rollout_cwd: Path | None = None
+    current_turn_cwd: Path | None = None
+    attachment_turns: list[tuple[list[str], Path | None]] = []
+
+    for raw_line in rollout_path.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            entry = json.loads(raw_line)
+        except json.JSONDecodeError as exc:
+            fail(f"failed to parse rollout file {rollout_path}: {exc}")
+
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            continue
+
+        if entry.get("type") == "session_meta":
+            cwd = payload.get("cwd")
+            if isinstance(cwd, str) and cwd.strip():
+                default_rollout_cwd = Path(cwd).expanduser()
+                current_turn_cwd = default_rollout_cwd
+            continue
+
+        if entry.get("type") == "turn_context":
+            cwd = payload.get("cwd")
+            if isinstance(cwd, str) and cwd.strip():
+                current_turn_cwd = Path(cwd).expanduser()
+            else:
+                current_turn_cwd = default_rollout_cwd
+            continue
+
+        if entry.get("type") != "event_msg" or payload.get("type") != "user_message":
+            continue
+
+        local_images = payload.get("local_images")
+        if isinstance(local_images, list) and local_images:
+            attachment_turns.append(([str(item) for item in local_images], current_turn_cwd))
+            if len(attachment_turns) > THREAD_ATTACHMENT_MAX_TURNS:
+                fail(
+                    "thread attachment history is too large to scan safely "
+                    f"(max {THREAD_ATTACHMENT_MAX_TURNS} attachment-bearing turn(s))"
+                )
+    return attachment_turns
+
+
+def load_thread_attachment_turns(thread_id: str) -> list[tuple[list[str], Path | None]]:
+    attachment_turns = read_thread_attachment_turns(thread_id)
+
+    if not attachment_turns:
+        fail(
+            "no local image attachments were found in the Codex session rollout; "
+            "use a real file path or attach the image in the current conversation first"
+        )
+    return attachment_turns
+
+
+def latest_attachment_turn(thread_id: str) -> tuple[list[str], Path | None] | None:
+    attachment_turns = read_thread_attachment_turns(thread_id)
+    if not attachment_turns:
+        return None
+    return attachment_turns[-1]
+
+
+def dedupe_paths(paths: Iterable[Path]) -> list[Path]:
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+def load_active_image_set(thread_id: str) -> list[Path]:
+    path = active_image_set_path(thread_id)
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"failed to read active image set {path}: {exc}")
+
+    raw_images = payload.get("images")
+    if not isinstance(raw_images, list):
+        return []
+
+    resolved_paths: list[Path] = []
+    for item in raw_images:
+        if not isinstance(item, str):
+            continue
+        resolved = resolve_existing_path(item)
+        if resolved is not None:
+            resolved_paths.append(resolved)
+    return dedupe_paths(resolved_paths)
+
+
+def save_active_image_set(thread_id: str, images: list[Path]) -> None:
+    path = active_image_set_path(thread_id)
+    ensure_parent(path)
+    payload = {
+        "thread_id": thread_id,
+        "images": [str(path_item.resolve()) for path_item in dedupe_paths(images)],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_last_output_set(thread_id: str) -> list[Path]:
+    path = last_output_set_path(thread_id)
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"failed to read last output set {path}: {exc}")
+
+    raw_images = payload.get("images")
+    if not isinstance(raw_images, list):
+        return []
+
+    resolved_paths: list[Path] = []
+    for item in raw_images:
+        if not isinstance(item, str):
+            continue
+        resolved = resolve_existing_path(item)
+        if resolved is not None:
+            resolved_paths.append(resolved)
+    return dedupe_paths(resolved_paths)
+
+
+def save_last_output_set(thread_id: str, images: list[Path]) -> None:
+    path = last_output_set_path(thread_id)
+    ensure_parent(path)
+    payload = {
+        "thread_id": thread_id,
+        "images": [str(path_item.resolve()) for path_item in dedupe_paths(images)],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def resolve_image_set_selector(selector: str, thread_id: str) -> list[Path]:
+    normalized = selector.strip()
+    if normalized == "active":
+        return load_active_image_set(thread_id)
+    if normalized == "last-output":
+        return load_last_output_set(thread_id)
+    if normalized == "latest-turn":
+        latest = latest_attachment_turn(thread_id)
+        if latest is None:
+            return []
+        images, rollout_cwd = latest
+        return [resolve_attachment_from_turn(str(index), images=images, rollout_cwd=rollout_cwd) for index in range(1, len(images) + 1)]
+    if normalized.startswith("turn:"):
+        offset_text = normalized.split(":", 1)[1].strip()
+        try:
+            offset = int(offset_text)
+        except ValueError:
+            fail(f"invalid image-set selector: {selector}")
+        if offset >= 0:
+            fail(f"turn image-set selectors must use a negative offset: {selector}")
+        attachment_turns = load_thread_attachment_turns(thread_id)
+        turn_index = len(attachment_turns) - 1 + offset
+        if turn_index < 0 or turn_index >= len(attachment_turns):
+            fail(
+                f"image-set selector {selector} is out of range for this thread "
+                f"({len(attachment_turns)} attachment-bearing turn(s))"
+            )
+        images, rollout_cwd = attachment_turns[turn_index]
+        return [resolve_attachment_from_turn(str(index), images=images, rollout_cwd=rollout_cwd) for index in range(1, len(images) + 1)]
+    if normalized.startswith("thread:"):
+        indexes_text = normalized.split(":", 1)[1].strip()
+        if not indexes_text:
+            fail(f"invalid image-set selector: {selector}")
+        attachment_turns = load_thread_attachment_turns(thread_id)
+        flattened = flatten_thread_attachments(attachment_turns)
+        selected_paths: list[Path] = []
+        for chunk in indexes_text.split(","):
+            chunk = chunk.strip()
+            try:
+                index = int(chunk) - 1
+            except ValueError:
+                fail(f"invalid image-set selector: {selector}")
+            if index < 0 or index >= len(flattened):
+                fail(
+                    f"image-set selector {selector} is out of range for this thread "
+                    f"({len(flattened)} attachment(s))"
+                )
+            image, rollout_cwd = flattened[index]
+            resolved = resolve_rollout_path(image, rollout_cwd=rollout_cwd)
+            if resolved is None:
+                cwd_text = f" with rollout cwd {rollout_cwd}" if rollout_cwd is not None else ""
+                fail(f"attached image path could not be resolved to a file: {image}{cwd_text}")
+            selected_paths.append(resolved)
+        return dedupe_paths(selected_paths)
+    fail(f"unsupported image-set selector: {selector}")
+
+
+def resolve_flattened_attachment(image: str, *, rollout_cwd: Path | None) -> Path:
+    resolved = resolve_rollout_path(image, rollout_cwd=rollout_cwd)
+    if resolved is None:
+        cwd_text = f" with rollout cwd {rollout_cwd}" if rollout_cwd is not None else ""
+        fail(f"attached image path could not be resolved to a file: {image}{cwd_text}")
+    return resolved
+
+
+def resolve_attachment_from_turn(
+    raw: str,
+    *,
+    images: list[str],
+    rollout_cwd: Path | None,
+) -> Path:
+    index = int(raw) - 1
+    if index < 0 or index >= len(images):
+        fail(
+            f"attachment placeholder index {index + 1} is out of range for the selected turn "
+            f"({len(images)} attachment(s))"
+        )
+    selected = images[index]
+    return resolve_flattened_attachment(selected, rollout_cwd=rollout_cwd)
+
+
+def resolve_dash_image_sequence(raw_values: list[str], thread_id: str) -> list[Path] | None:
+    if not raw_values or not all(raw.strip() == "-" for raw in raw_values):
+        return None
+    attachment_turns = load_thread_attachment_turns(thread_id)
+    latest_images, latest_rollout_cwd = attachment_turns[-1]
+    if len(raw_values) <= len(latest_images):
+        return [
+            resolve_attachment_from_turn(str(index), images=latest_images, rollout_cwd=latest_rollout_cwd)
+            for index in range(1, len(raw_values) + 1)
+        ]
+    flattened = flatten_thread_attachments(attachment_turns)
+    if len(raw_values) <= len(flattened):
+        return [
+            resolve_flattened_attachment(image, rollout_cwd=rollout_cwd)
+            for image, rollout_cwd in flattened[: len(raw_values)]
+        ]
+    return None
+
+
+def resolve_sequential_current_placeholders(raw_values: list[str], thread_id: str) -> list[Path] | None:
+    if not raw_values:
+        return None
+    indexes: list[int] = []
+    for raw in raw_values:
+        match = ATTACHMENT_PLACEHOLDER_PATTERN.match(raw)
+        if not match:
+            return None
+        indexes.append(int(match.group(1)))
+    if indexes != list(range(1, len(raw_values) + 1)):
+        return None
+
+    attachment_turns = load_thread_attachment_turns(thread_id)
+    latest_images, _latest_rollout_cwd = attachment_turns[-1]
+    if len(indexes) <= len(latest_images):
+        return None
+
+    flattened = flatten_thread_attachments(attachment_turns)
+    if len(indexes) > len(flattened):
+        return None
+    return [
+        resolve_flattened_attachment(image, rollout_cwd=rollout_cwd)
+        for image, rollout_cwd in flattened[: len(indexes)]
+    ]
+
+
+def resolve_image_reference(raw: str) -> Path:
+    thread_id = current_thread_id()
+    attachment_match = ATTACHMENT_PLACEHOLDER_PATTERN.match(raw)
+    turn_match = TURN_ATTACHMENT_PLACEHOLDER_PATTERN.match(raw)
+    thread_match = THREAD_ATTACHMENT_PLACEHOLDER_PATTERN.match(raw)
+    last_output_match = LAST_OUTPUT_PLACEHOLDER_PATTERN.match(raw)
+
+    if attachment_match or turn_match or thread_match or last_output_match:
+        if thread_id is None:
+            fail("image attachment placeholders require CODEX_THREAD_ID or CODEX_SESSION_ID")
+        if last_output_match:
+            outputs = load_last_output_set(thread_id)
+            index = int(last_output_match.group(1) or "1") - 1
+            if index < 0 or index >= len(outputs):
+                fail(
+                    f"last output placeholder {raw.strip()} is out of range for this thread "
+                    f"({len(outputs)} saved output(s))"
+                )
+            return outputs[index]
+
+        attachment_turns = load_thread_attachment_turns(thread_id)
+
+        if attachment_match:
+            images, rollout_cwd = attachment_turns[-1]
+            return resolve_attachment_from_turn(
+                attachment_match.group(1),
+                images=images,
+                rollout_cwd=rollout_cwd,
+            )
+
+        if turn_match:
+            turn_offset = int(turn_match.group(1))
+            if turn_offset >= 0:
+                fail(f"turn attachment placeholders must use a negative offset: {raw.strip()}")
+            turn_index = len(attachment_turns) - 1 + turn_offset
+            if turn_index < 0 or turn_index >= len(attachment_turns):
+                fail(
+                    f"turn attachment placeholder {raw.strip()} is out of range for this thread "
+                    f"({len(attachment_turns)} attachment-bearing turn(s))"
+                )
+            images, rollout_cwd = attachment_turns[turn_index]
+            return resolve_attachment_from_turn(
+                turn_match.group(2),
+                images=images,
+                rollout_cwd=rollout_cwd,
+            )
+
+        flattened = flatten_thread_attachments(attachment_turns)
+
+        index = int(thread_match.group(1)) - 1
+        if index < 0 or index >= len(flattened):
+            fail(
+                f"thread attachment placeholder {raw.strip()} is out of range for this thread "
+                f"({len(flattened)} attachment(s))"
+            )
+        selected, rollout_cwd = flattened[index]
+        return resolve_flattened_attachment(selected, rollout_cwd=rollout_cwd)
+
+    resolved = resolve_existing_path(raw)
+    if resolved is None:
+        fail(f"input image not found: {Path(raw).expanduser()}")
+    return resolved
 
 
 def resolve_output_paths(
@@ -790,6 +1231,7 @@ def maybe_print_preview(preview: dict[str, Any], *, dry_run: bool) -> bool:
 
 def resolve_edit_inputs(args: argparse.Namespace) -> tuple[list[Path], str]:
     raw_values: list[str] = []
+    selector_values: list[str] = list(getattr(args, "image_set", []) or [])
     positional = list(getattr(args, "positional", []) or [])
 
     if getattr(args, "image", None):
@@ -798,22 +1240,39 @@ def resolve_edit_inputs(args: argparse.Namespace) -> tuple[list[Path], str]:
             fail("when --image is used, provide prompt as one trailing argument or use --prompt-file")
         prompt_arg = positional[0] if positional else None
     else:
-        if not positional:
-            fail("at least one input image is required")
         if len(positional) > 2:
             fail("edit expects INPUT_IMAGE PROMPT when --image is not used")
-        raw_values.append(positional[0])
-        prompt_arg = positional[1] if len(positional) == 2 else None
+        if len(positional) == 2:
+            raw_values.append(positional[0])
+            prompt_arg = positional[1]
+        else:
+            prompt_arg = positional[0] if positional else None
 
-    if not raw_values:
-        fail("at least one input image is required")
+    thread_id = current_thread_id()
+    selected_paths: list[Path] = []
 
-    paths: list[Path] = []
+    for selector in selector_values:
+        if thread_id is None:
+            fail("image-set selectors require CODEX_THREAD_ID or CODEX_SESSION_ID")
+        selected_paths.extend(resolve_image_set_selector(selector, thread_id))
+
+    if raw_values and thread_id is not None:
+        dash_paths = resolve_dash_image_sequence(raw_values, thread_id)
+        if dash_paths is not None:
+            selected_paths.extend(dash_paths)
+            raw_values = []
+        else:
+            sequential_paths = resolve_sequential_current_placeholders(raw_values, thread_id)
+            if sequential_paths is not None:
+                selected_paths.extend(sequential_paths)
+                raw_values = []
+
     for raw in raw_values:
-        path = Path(raw).expanduser()
-        if not path.is_file():
-            fail(f"input image not found: {path}")
-        paths.append(path)
+        selected_paths.append(resolve_image_reference(raw))
+
+    paths = dedupe_paths(selected_paths)
+    if not paths:
+        fail("at least one input image is required")
     if len(paths) > IMAGE_MAX_EDIT_IMAGES:
         fail(f"at most {IMAGE_MAX_EDIT_IMAGES} input images are supported for edit")
     return paths, read_prompt(prompt_arg, args.prompt_file)
@@ -893,11 +1352,24 @@ def build_generate_payload(
     return payload
 
 
+def redirect_generate_args_to_edit(args: argparse.Namespace) -> argparse.Namespace:
+    redirected = argparse.Namespace(**vars(args))
+    redirected.command = "edit"
+    redirected.func = cmd_edit
+    redirected.positional = [args.prompt] if args.prompt else []
+    redirected.mask = None
+    redirected.input_fidelity = None
+    redirected.image_set = []
+    redirected.reset_image_set = False
+    return redirected
+
+
 def cmd_generate(args: argparse.Namespace) -> int:
+    if getattr(args, "image", None):
+        log("redirecting generate --image request to edit")
+        return cmd_edit(redirect_generate_args_to_edit(args))
     runtime = resolve_runtime()
     api_key = ensure_api_key(runtime)
-    if getattr(args, "image", None):
-        fail("generate does not accept image inputs; use `edit --image <path>` for any request where the model must see reference images")
     prompt = read_prompt(args.prompt, args.prompt_file)
     model = effective_model(args.model, runtime)
     size, delivery_size, quality, fmt, compression, background, moderation, size_note = common_runtime_values(args, runtime)
@@ -956,6 +1428,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
         force=args.force,
         expected_size=delivery_size,
     )
+    thread_id = current_thread_id()
+    if thread_id is not None:
+        save_last_output_set(thread_id, written)
     for path in written:
         log(f"generate saved {path}")
         print(str(path))
@@ -967,9 +1442,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
     api_key = ensure_api_key(runtime)
     input_paths, prompt = resolve_edit_inputs(args)
 
-    mask_path = Path(args.mask).expanduser() if args.mask else None
-    if mask_path and not mask_path.is_file():
-        fail(f"mask image not found: {mask_path}")
+    mask_path = resolve_image_reference(args.mask) if args.mask else None
 
     model = effective_model(args.model, runtime)
     size, delivery_size, quality, fmt, compression, background, moderation, size_note = common_runtime_values(args, runtime)
@@ -1022,6 +1495,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
     preview["image"] = [str(path) for path in input_paths]
     if mask_path:
         preview["mask"] = str(mask_path)
+    thread_id = current_thread_id()
     if maybe_print_preview(
         {
             "endpoint": "/v1/images/edits",
@@ -1030,6 +1504,8 @@ def cmd_edit(args: argparse.Namespace) -> int:
         },
         dry_run=args.dry_run,
     ):
+        if thread_id is not None:
+            save_active_image_set(thread_id, input_paths)
         return 0
 
     data = post_multipart(
@@ -1045,6 +1521,9 @@ def cmd_edit(args: argparse.Namespace) -> int:
         force=args.force,
         expected_size=delivery_size,
     )
+    if thread_id is not None:
+        save_active_image_set(thread_id, input_paths)
+        save_last_output_set(thread_id, written)
     for path in written:
         log(f"edit saved {path}")
         print(str(path))
@@ -1249,13 +1728,31 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--dry-run", action="store_true", help="print the request payload without calling the API")
 
     gen = sub.add_parser("generate", parents=[common], help="generate a new image")
-    gen.add_argument("--image", action="append", help="not supported for generate; use edit --image for reference images")
+    gen.add_argument(
+        "--image",
+        action="append",
+        help="reference image path or attachment placeholder like [Image #1] or [Last Output]; warns and redirects to edit when provided",
+    )
     gen.add_argument("prompt", nargs="?", help="generation prompt")
     gen.set_defaults(func=cmd_generate)
 
     edit = sub.add_parser("edit", parents=[common], help="edit one or more existing images")
-    edit.add_argument("--image", action="append", help="input image path; repeat to provide multiple images")
-    edit.add_argument("--mask", help="optional PNG mask image path")
+    edit.add_argument(
+        "--image",
+        action="append",
+        help="input image path or Codex attachment placeholder like [Image #1] or [Last Output]; repeat to provide multiple images",
+    )
+    edit.add_argument(
+        "--image-set",
+        action="append",
+        help="image set selector: active, last-output, latest-turn, turn:-K, or thread:1,2,5; repeat to merge selectors",
+    )
+    edit.add_argument(
+        "--reset-image-set",
+        action="store_true",
+        help="compatibility flag retained for older calls; explicit --image-set selectors are required",
+    )
+    edit.add_argument("--mask", help="optional PNG mask image path or attachment placeholder like [Image #1] or [Last Output]")
     edit.add_argument("--input-fidelity", choices=("low", "high"), help="input fidelity hint for images edit")
     edit.add_argument("positional", nargs="*", help="legacy INPUT_IMAGE PROMPT or prompt when --image is used")
     edit.set_defaults(func=cmd_edit)

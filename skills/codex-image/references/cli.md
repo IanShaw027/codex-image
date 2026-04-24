@@ -1,69 +1,52 @@
 # CLI reference (`scripts/codex_image.py`)
 
-This skill is an explicit local CLI workflow. Use the bundled script directly instead of creating ad hoc runners.
-
-## Commands
-
-- `generate`: create a new image through `/v1/images/generations`
-- `edit`: edit one or more existing local images through `/v1/images/edits`
-- `generate-batch`: run many generation jobs from a JSONL file
-
-## Quick start
-
-Set a stable path to the skill:
+Use the bundled script directly:
 
 ```bash
 export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 export CODEX_IMAGE="$CODEX_HOME/skills/codex-image/scripts/codex_image.py"
 ```
 
-Generate:
+## Commands
+
+- `generate`: `POST /v1/images/generations`
+- `edit`: `POST /v1/images/edits`
+- `generate-batch`: many generation jobs from JSONL
+
+## Common shapes
 
 ```bash
-python3 "$CODEX_IMAGE" generate \
-  --model gpt-image-2 \
-  --size 3840x2160 \
-  "Draw a Doraemon-inspired large language model infographic, image only, no text"
+python3 "$CODEX_IMAGE" generate --size 3840x2160 "Prompt"
+python3 "$CODEX_IMAGE" edit --image ./input.png "Change only X; keep Y unchanged"
+python3 "$CODEX_IMAGE" edit --image '[Image #1]' "Use the most recent attachment-bearing turn in this Codex thread"
+python3 "$CODEX_IMAGE" edit --image '[Turn -1 Image #1]' --image '[Thread Image #3]' "Mix prior-turn and thread-wide references"
+python3 "$CODEX_IMAGE" edit --image-set active "In a Codex thread, explicitly reuse the previous edit input list"
+python3 "$CODEX_IMAGE" edit --image-set last-output "In a Codex thread, continue refining the previous saved result image"
+python3 "$CODEX_IMAGE" edit --image-set active --image-set latest-turn "In a Codex thread, explicitly merge the previous input list with the latest attachment-bearing turn"
+python3 "$CODEX_IMAGE" edit --image '[Turn -1 Image #1]' --image '[Turn -1 Image #2]' --image '[Image #1]' "After a follow-up with one new attachment, carry forward the prior two images plus the new one"
+python3 "$CODEX_IMAGE" edit --image '[Last Output]' --image '[Image #1]' "Refine the last result image and use the current upload as a new realism/style reference"
+python3 "$CODEX_IMAGE" generate-batch --input ./prompts.jsonl --out-dir ./output/batch
 ```
 
-Edit:
+## Key rules
 
-```bash
-python3 "$CODEX_IMAGE" edit \
-  --image ./input-a.png \
-  --image ./input-b.png \
-  "Change only the background to a bright blue futuristic scene; keep the subject unchanged"
-```
+- If the model must see any real image input, use `edit`.
+- `generate --image` emits a warning and is rerouted to `edit`.
+- `--image '[Image #N]'` resolves against the most recent attachment-bearing user turn, not necessarily the current turn or the most recent text-only user message.
+- `--image '[Turn -K Image #N]'` resolves against the `K`th previous attachment-bearing user turn.
+- `--image '[Thread Image #N]'` resolves against stable thread-wide attachment order.
+- `--image '[Last Output]'` or `--image '[Last Output #N]'` resolves against the previous saved output image list for the thread.
+- After a follow-up that adds only one new attachment, `[Image #1]` refers to that new attachment only. Do not treat older images as `[Image #2]` or `[Image #3]`; switch to `[Turn -1 Image #N]`, `[Thread Image #N]`, or `--image-set`.
+- Placeholder and selector resolution use the rollout-recorded cwd for each attachment-bearing turn; they do not fall back to the current shell cwd.
+- `edit` does not implicitly inherit prior thread state. Reuse requires explicit `--image-set` selectors or explicit `--image`.
+- `--image-set` accepts `active`, `last-output`, `latest-turn`, `turn:-K`, and `thread:1,2,5`, and is also Codex-thread-only.
+- `active` means the previous `edit` call's resolved input image list for the thread, not prior generated outputs and not every attachment seen in the thread.
+- `last-output` means the previous saved result image list for the thread, not the previous input list.
+- `--reset-image-set` is a compatibility flag and no longer changes selector behavior.
+- Minor placeholder variants such as `[Image#1]` and `[image # 1]` are normalized automatically.
+- For multipart edits, repeat the `image` field; do not rename it to `images`.
 
-Use `edit` whenever image files are provided as references. The multipart Images API uses repeated `image` fields for multiple inputs; JSON-only examples may call this an `images` array, but multipart requests should not rename the field to `images`.
-
-Batch:
-
-```bash
-python3 "$CODEX_IMAGE" generate-batch \
-  --input ./prompts.jsonl \
-  --out-dir ./output/batch
-```
-
-## Wrappers
-
-macOS and Linux:
-
-```bash
-"$CODEX_HOME/skills/codex-image/scripts/generate.sh" "Draw a clean futuristic AI wallpaper"
-"$CODEX_HOME/skills/codex-image/scripts/edit.sh" --image ./input.png "Change only the background"
-"$CODEX_HOME/skills/codex-image/scripts/generate-batch.sh" --input ./prompts.jsonl --out-dir ./output/batch
-```
-
-Windows:
-
-```bat
-%USERPROFILE%\.codex\skills\codex-image\scripts\generate.cmd "Draw a clean futuristic AI wallpaper"
-%USERPROFILE%\.codex\skills\codex-image\scripts\edit.cmd --image input.png "Change only the background"
-%USERPROFILE%\.codex\skills\codex-image\scripts\generate-batch.cmd --input prompts.jsonl --out-dir output\batch
-```
-
-## Core options
+## Important options
 
 - `--model <images-model>`
 - `--size <auto|WIDTHxHEIGHT|WIDTH:HEIGHT|WIDTH:HEIGHT@1k|1k@WIDTH:HEIGHT>`
@@ -75,64 +58,50 @@ Windows:
 - `--n <1-10>`
 - `--out <exact-output-file>`
 - `--out-dir <directory>`
-- `--name <readable-prefix>` for `generate`
+- `--name <readable-prefix>`
 - `--prompt-file <path>`
 - `--dry-run`
 - `--force`
-- `generate --image` is intentionally rejected; use `edit --image` whenever the model must see image files.
 - `--image <path>` repeated for `edit`
+- `--image-set <selector>` repeated for `edit`
+- `--reset-image-set` for `edit`
 - `--mask <mask.png>` for `edit`
 - `--input-fidelity <low|high>` for `edit`
 
-## Size handling
+## Size behavior
 
-- Valid direct sizes are sent as-is.
-- Ratio input such as `16:9`, `9:16`, or `6:16` is converted to the largest valid direct size under the OpenAI image constraints.
-- Ratio plus tier input such as `9:16@1k`, `9:16 1k`, or `1k@9:16` is local CLI syntax, not Images API syntax. The CLI resolves it to a direct `WIDTHxHEIGHT` before sending the API request.
-- Tier names use the short edge as the target baseline: `1k` means short edge around `1024`, `2k` around `2048`, and `4k` around `4096`, then the result is adjusted to the nearest valid API size under the configured constraints.
-- For direct sizes, the CLI also appends a final-canvas constraint to the prompt so the model is asked to compose for the intended final delivery dimensions.
-- Explicit `WIDTHxHEIGHT` sizes are passed to the API unchanged, including non-standard sizes such as `1000x1800`.
-- Explicit non-standard sizes remain the final delivery target. If the API returns a different pixel size with a close aspect ratio, the saved output is verified and resized back to the requested dimensions locally.
-- If the returned aspect ratio differs materially from the requested final size, the CLI fails instead of stretching. The next step should be a user/model decision: retry generation with stronger prompt constraints, crop to cover, pad to contain, or force stretch.
-- Request the final delivery size directly. Do not crop or upscale locally just to hit the target resolution.
+- Explicit `WIDTHxHEIGHT` is sent unchanged, including non-standard sizes such as `1000x1800`.
+- Ratio forms such as `16:9`, `9:16`, and `9:16@1k` are resolved locally to direct API sizes.
+- The CLI appends final-canvas wording to the prompt for direct-size delivery.
+- If the API returns the same aspect ratio with different pixels, the saved file is resized locally to the requested final size.
+- If the returned aspect ratio differs materially, the CLI fails instead of stretching automatically.
 
-Examples:
+Common resolved sizes:
 
 - `16:9` -> `3840x2160`
 - `9:16` -> `2160x3840`
 - `6:16` -> `1440x3840`
 - `9:16@1k` -> `1008x1792`
 - `9:16@2k` -> `2016x3584`
-- `9:16@4k` -> `2160x3840` due to the maximum-edge and maximum-pixel constraints
-- `1000x1800` -> sent to the API as `1000x1800`; if the returned file differs, resize locally to `1000x1800`
+- `9:16@4k` -> `2160x3840`
 
-## Output handling
+## Output behavior
 
-- Default output base is `${CODEX_HOME:-~/.codex}/generated_images/`.
-- Inside Codex, the default subdirectory is derived from `CODEX_THREAD_ID` or `CODEX_SESSION_ID`.
-- Outside Codex, the default subdirectory is `manual/`.
-- `--out` writes exactly where you point it.
-- `--out-dir` is the simplest choice for multi-image results and batch runs.
-- `--name` keeps the default directory and generates `name-randomsuffix.ext`.
-- when `--n > 1`, numbered sibling files are created.
+- Default output base: `${CODEX_HOME:-~/.codex}/generated_images/`
+- Inside Codex: thread subdirectory from `CODEX_THREAD_ID` or `CODEX_SESSION_ID`
+- Outside Codex: `manual/`
+- `--out` writes an exact path.
+- `--out-dir` is best for batch or multi-output work.
+- `--name` keeps the default directory and adds an automatic random suffix.
+- When `--n > 1`, numbered sibling files are created.
 
 ## Batch input
 
-`generate-batch` reads one JSONL job per line.
+- One JSONL job per line.
+- String line: `"Prompt"`
+- Object line: `{"prompt":"Prompt","size":"16:9","n":2}`
 
-String line:
-
-```json
-"Draw a clean futuristic AI wallpaper"
-```
-
-Object line:
-
-```json
-{"prompt":"Draw a clean futuristic AI wallpaper","size":"16:9","n":2,"quality":"high"}
-```
-
-Supported per-job overrides:
+Per-job overrides:
 
 - `prompt`
 - `model`
@@ -146,17 +115,9 @@ Supported per-job overrides:
 - `name`
 - `out`
 
-## Logging
+## Related docs
 
-The script writes concise logs to stderr:
-
-- request start with model, size, quality, format, background, and output path
-- normalization notes when size input is adjusted
-- HTTP status and byte count
-- final saved path
-
-## Authentication and runtime config
-
-See `references/codex-network.md` for auth, base URL, and config resolution.
-
-This script has no extra Python package dependency. For related workflows that need the OpenAI SDK or other packages, install them into `${CODEX_HOME:-$HOME/.codex}/.venv`.
+- `references/prompting.md`
+- `references/sample-prompts.md`
+- `references/image-api.md`
+- `references/codex-network.md`

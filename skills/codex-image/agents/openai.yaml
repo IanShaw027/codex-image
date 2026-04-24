@@ -1,9 +1,9 @@
 interface:
   display_name: "Codex Image"
-  short_description: "Generate or edit saved images when built-in image_gen is unavailable"
+  short_description: "Saved-file Images API workflow for API-key mode, custom base URLs, exact paths or sizes, and built-in fallback"
   icon_small: "./assets/codex-image.svg"
   icon_large: "./assets/codex-image.svg"
-  default_prompt: "Use $codex-image for raster image generation or editing when the current Codex session does not expose the built-in image_gen tool, when Codex is in API key mode, or when the user asks for saved PNG/JPEG/WebP output, exact output paths, exact sizes, aspect ratios, Images API, custom OPENAI_BASE_URL, or the local CLI workflow. This skill is Images API only: use the bundled scripts, preserve Codex config lookup and output-path behavior, and save the final image to disk with a concrete path. Do not replace this workflow with hand-drawn SVG, Pillow sketches, screenshots, or one-off scripts unless the user explicitly asks for code-native drawing."
+  default_prompt: "Use $codex-image for local saved-file Images API work: API-key mode, custom `OPENAI_BASE_URL`, exact output path/size, PNG/JPEG/WebP output, or fallback when `image_gen` is hidden, unavailable, or fails before producing an image. Invoke `/opt/homebrew/bin/python3.12 /Users/ianshaw/.codex/skills/codex-image/scripts/codex_image.py`. Use `edit` for real input images. `[Image #N]` means only the latest attachment-bearing user turn; if a follow-up adds one new image, keep it as `[Image #1]` and reference older images explicitly with `[Turn -K Image #N]`, `[Thread Image #N]`, or `--image-set turn:-K`. If the user wants to refine the previous result image itself, use `[Last Output]` or `--image-set last-output` and describe that image as the base result to refine."
 
 policy:
   allow_implicit_invocation: true
