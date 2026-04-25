@@ -1,17 +1,61 @@
+<div align="center">
+
 # codex-image
 
-`codex-image` is a Codex skill for local saved-file image generation and editing.
-It gives Codex installed launcher paths, exact output-file control, batch jobs,
-explicit thread image references, and API-key-mode HTTP access for OpenAI-
-compatible image endpoints.
+**A practical Codex image skill for people who want real saved files, exact paths, multi-image edits, batch jobs, and explicit image reuse.**
 
-It is not a replacement for the built-in/system `imagegen` runtime tool.
-Instead, the two paths are intentionally split:
+Built for the workflows that the native built-in image path does not try to optimize:
+**save to disk**, **edit from real local files**, **merge multiple references**, **carry forward previous outputs**, and **run through API-key mode or custom gateways**.
 
-- built-in `imagegen` for native current-turn image context and the fastest
-  normal image conversation flow
-- `codex-image` for local files, exact output paths/sizes, API key mode, batch
-  jobs, and explicit image reuse semantics
+</div>
+
+## Gallery
+
+Real outputs created with this skill:
+
+| One-shot generate | Character + real-person harmony |
+| --- | --- |
+| ![Doraemon demo](./docs/assets/doraemon-demo.png) | ![Beauty and Doraemon demo](./docs/assets/beauty-doraemon-demo.png) |
+| Multi-person scene edit | Identity-consistent portrait grid |
+| ![Basketball singing demo](./docs/assets/basketball-singing-demo.png) | ![Portrait grid demo](./docs/assets/portrait-grid-demo.png) |
+
+## Why this exists
+
+The built-in/system `imagegen` path is better when you want the **native current-turn image conversation**:
+
+- fastest simple generate/edit
+- natural multi-turn continuation
+- runtime-native image context
+
+`codex-image` is for the other half of the problem:
+
+- exact `--out` / `--out-dir`
+- saved files on disk
+- multi-image edits and merges
+- masks and `input_fidelity`
+- batch generation from JSONL
+- explicit thread-aware reuse like `[Last Output]`
+- API key mode and custom `OPENAI_BASE_URL`
+
+So this repo is not trying to replace built-in `imagegen` with a thinner clone.  
+It is trying to make the **local saved-file image workflow** much better.
+
+## What it feels like in practice
+
+Three common examples:
+
+1. **One-shot local generation**
+   - "给我生成一个哆啦 A 梦"
+   - save directly to a predictable local file
+
+2. **Reference-based editing**
+   - use one uploaded person reference plus one generated Doraemon result
+   - merge them into one harmonious scene
+
+3. **Complex multi-image composition**
+   - combine two people into one basketball stage scene
+   - preserve a short lyric element like `鸡你太美`
+   - still save the final PNG locally
 
 The published skill lives at [`skills/codex-image`](./skills/codex-image).
 
@@ -24,6 +68,24 @@ Suggested GitHub topics: `codex`, `codex-skill`, `image-generation`, `openai`, `
 - It writes generated or edited images to deterministic local files instead of relying on inline image output.
 - It supports practical delivery sizes, ratio shortcuts, multi-image edits, masks, `input_fidelity`, and JSONL batch generation.
 - It supports explicit thread-local reuse such as `[Last Output]`, `[Turn -K Image #N]`, and `--image-set ...`.
+
+## Quick choice guide
+
+Use built-in/system `imagegen` when you want:
+
+- native current-turn image context
+- the fastest simple image conversation
+- normal follow-up editing with as little local workflow as possible
+
+Use `codex-image` when you want:
+
+- exact output path or directory
+- local saved files every time
+- multiple explicit reference images
+- masks and local edit controls
+- API-key mode or custom base URLs
+- batch jobs
+- explicit thread-aware reuse
 
 ## What it supports
 
@@ -69,6 +131,26 @@ That document now also includes:
 - when to use built-in `imagegen`
 - when to use `codex-image`
 - why some flows are better in one path than the other
+- concrete request shapes for:
+  - `POST /v1/images/generations`
+  - `POST /v1/images/edits`
+  - `POST /v1/responses`
+
+## Feature highlights
+
+- **Saved-file first**
+  - deterministic local outputs instead of only inline image results
+- **Exact output control**
+  - `--out`, `--out-dir`, `--name`, exact delivery size
+- **Better edit workflows**
+  - multiple references, masks, `input_fidelity`, explicit carry-forward
+- **Thread-aware reuse**
+  - `[Image #N]`, `[Turn -K Image #N]`, `[Thread Image #N]`, `[Last Output]`
+- **Batch generation**
+  - JSONL prompt sets for repeated production work
+- **Transport split that matches real use**
+  - Images API by default
+  - Responses API only when explicit prior response state is actually needed
 
 ## Install
 
