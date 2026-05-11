@@ -183,10 +183,11 @@ Restart Codex after installation.
 
 Preferred runtime sources:
 
-1. `OPENAI_API_KEY`
-2. `OPENAI_BASE_URL`
+1. provider-specific env key from `${CODEX_HOME:-~/.codex}/config.toml`
+2. `OPENAI_API_KEY`
 3. `${CODEX_HOME:-~/.codex}/auth.json`
-4. `${CODEX_HOME:-~/.codex}/config.toml`
+4. `OPENAI_BASE_URL`
+5. `${CODEX_HOME:-~/.codex}/config.toml`
 
 Optional environment variables:
 
@@ -206,6 +207,8 @@ Model behavior:
 - The default transport is the Images API
 - An explicit Responses transport is available when prior response image state
   is part of the task
+- Official `gpt-image-2` requests reject transparent background locally before
+  the request is sent
 - In API key mode, `OPENAI_BASE_URL` or an equivalent provider `base_url` is required
 
 Dependency note:

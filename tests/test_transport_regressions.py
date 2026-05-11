@@ -1,13 +1,12 @@
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import unittest
 from email.message import Message
 from pathlib import Path
 from unittest import mock
-
-import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -348,9 +347,10 @@ class ResponsesTransportRegressionTests(unittest.TestCase):
             self.assertEqual(cached_path.suffix, ".png")
 
     def test_default_prompt_keeps_executable_launcher_and_boundary(self):
-        prompt = yaml.safe_load(
-            (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
-        )["interface"]["default_prompt"]
+        contents = (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
+        match = re.search(r'^\s{2}default_prompt:\s+"(.*)"\s*$', contents, re.MULTILINE)
+        self.assertIsNotNone(match)
+        prompt = match.group(1)
 
         self.assertLessEqual(len(prompt), 1024)
         self.assertIn("Prefer built-in `imagegen`", prompt)
