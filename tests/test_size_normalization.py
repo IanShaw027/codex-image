@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -113,6 +114,37 @@ class SizeNormalizationTests(unittest.TestCase):
                     codex_image.ensure_output_dimensions(Path(tmp.name), "1000x1800")
 
         resize.assert_called_once()
+
+    def test_transparent_background_is_rejected_for_gpt_image_2(self):
+        with self.assertRaises(SystemExit):
+            codex_image.validate_model_background("gpt-image-2", "transparent")
+
+    def test_read_image_dimensions_can_use_pillow_without_sips(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "image.png"
+            image_path.write_bytes(
+                bytes.fromhex(
+                    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                    "0000000d49444154789c636000000200015327d48d0000000049454e44ae426082"
+                )
+            )
+
+            fake_context = mock.MagicMock()
+            fake_context.width = 1
+            fake_context.height = 1
+            fake_context.__enter__.return_value = fake_context
+            fake_context.__exit__.return_value = False
+
+            fake_image_module = types.ModuleType("PIL.Image")
+            fake_image_module.open = mock.MagicMock(return_value=fake_context)
+            fake_pil_module = types.ModuleType("PIL")
+            fake_pil_module.Image = fake_image_module
+
+            with mock.patch.dict(sys.modules, {"PIL": fake_pil_module, "PIL.Image": fake_image_module}):
+                with mock.patch.object(codex_image.shutil, "which", return_value=None):
+                    dims = codex_image.read_image_dimensions(image_path)
+
+        self.assertEqual(dims, (1, 1))
 
     def test_multipart_uses_repeated_image_fields_for_multiple_inputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:

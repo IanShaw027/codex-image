@@ -6,8 +6,8 @@ This skill is designed for Codex API key mode and OpenAI-compatible Images API e
 
 Runtime values are resolved in this order:
 
-1. `OPENAI_API_KEY`
-2. provider-specific env key from `${CODEX_HOME:-~/.codex}/config.toml`
+1. provider-specific env key from `${CODEX_HOME:-~/.codex}/config.toml`
+2. `OPENAI_API_KEY`
 3. `${CODEX_HOME:-~/.codex}/auth.json`
 
 Base URL precedence:

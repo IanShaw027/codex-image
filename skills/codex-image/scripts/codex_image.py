@@ -369,6 +369,14 @@ def validate_transparency(background: str, fmt: str) -> None:
         fail("transparent background requires png or webp output")
 
 
+def validate_model_background(model: str, background: str) -> None:
+    if model.strip().lower() == "gpt-image-2" and background == "transparent":
+        fail(
+            "--background transparent is not supported by official gpt-image-2. "
+            "Use auto or opaque, or choose a model/provider that explicitly supports transparency."
+        )
+
+
 def validate_n(value: int) -> None:
     if value < 1 or value > IMAGE_MAX_N:
         fail(f"n must be between 1 and {IMAGE_MAX_N}")
@@ -1196,6 +1204,16 @@ def parse_direct_size(size: str | None) -> tuple[int, int] | None:
 
 
 def read_image_dimensions(path: Path) -> tuple[int, int] | None:
+    try:
+        from PIL import Image  # type: ignore[import-not-found]
+    except ImportError:
+        Image = None
+    if Image is not None:
+        try:
+            with Image.open(path) as image:
+                return image.width, image.height
+        except Exception:
+            pass
     if shutil.which("sips") is None:
         return None
     result = subprocess.run(
@@ -1221,6 +1239,18 @@ def read_image_dimensions(path: Path) -> tuple[int, int] | None:
 
 
 def resize_image_to_size(path: Path, width: int, height: int) -> None:
+    try:
+        from PIL import Image  # type: ignore[import-not-found]
+    except ImportError:
+        Image = None
+    if Image is not None:
+        try:
+            with Image.open(path) as image:
+                resized = image.resize((width, height))
+                resized.save(path)
+            return
+        except Exception:
+            pass
     if shutil.which("sips") is None:
         fail(
             f"generated image {path} does not match requested size and local sips is unavailable "
@@ -1757,6 +1787,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     model = effective_model(args.model, runtime)
     transport = effective_transport(getattr(args, "transport", None), runtime)
     size, delivery_size, quality, fmt, compression, background, moderation, size_note = common_runtime_values(args, runtime)
+    validate_model_background(model, background)
     n = args.n
     validate_n(n)
 
@@ -1892,6 +1923,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
 
     model = effective_model(args.model, runtime)
     size, delivery_size, quality, fmt, compression, background, moderation, size_note = common_runtime_values(args, runtime)
+    validate_model_background(model, background)
     validate_input_fidelity(args.input_fidelity)
     n = args.n
     validate_n(n)
@@ -2073,6 +2105,7 @@ def run_batch_job(
     validate_moderation(moderation)
     validate_compression(compression)
     validate_transparency(background, fmt)
+    validate_model_background(model, background)
     validate_n(n)
 
     name_spec = str(job.get("name") or f"{index:03d}-{slugify(prompt)}")
