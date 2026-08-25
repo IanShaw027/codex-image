@@ -1,11 +1,11 @@
 ---
 name: codex-image
-description: Use when generating or editing raster images and the built-in image_gen tool is not exposed in the current Codex session, when Codex is running in API key mode, or when the user explicitly asks for codex-image, saved PNG/JPEG/WebP output, Images API, custom OPENAI_BASE_URL, exact output path, exact size, aspect ratio, or local image CLI workflow.
+description: Use when generating or editing raster images and the built-in image_gen tool is not exposed in the current Codex session, when Codex is running in API key mode, or when the user explicitly asks for codex-image, saved PNG/JPEG/WebP output, Images API, optional Atlas Cloud generation, custom OPENAI_BASE_URL, exact output path, exact size, aspect ratio, or local image CLI workflow.
 ---
 
 # Codex Image Skill
 
-Local saved-file raster image workflow backed by `scripts/codex_image.py`, shell launchers, and thin OpenAI-compatible image HTTP calls.
+Local saved-file raster image workflow backed by `scripts/codex_image.py`, shell launchers, thin OpenAI-compatible image HTTP calls, and an explicit optional Atlas Cloud text-to-image transport.
 
 ## Core rules
 
@@ -16,7 +16,7 @@ Local saved-file raster image workflow backed by `scripts/codex_image.py`, shell
 - Once this skill is selected, usually run the installed launcher first. Preflight config, auth, or `--help` only when the launcher is missing or its failure still leaves a real decision to make.
 - When a launcher call fails with a deterministic local parse or input-shape error and the safe retry is obvious, retry once immediately in the same turn before sending commentary.
 - Do not fall back to SVG, Pillow sketches, screenshots, or one-off scripts unless the user explicitly wants code-native graphics.
-- `OPENAI_BASE_URL` or provider `base_url` must exist in API-key mode.
+- `OPENAI_BASE_URL` or provider `base_url` must exist for the default Images and Responses transports. Atlas uses `ATLASCLOUD_API_KEY` and its fixed public API endpoint.
 
 ## When to use
 
@@ -25,6 +25,7 @@ Local saved-file raster image workflow backed by `scripts/codex_image.py`, shell
 - Use exact output paths, exact sizes, aspect ratios, PNG/JPEG/WebP, or custom provider endpoints
 - Use this path in API-key mode, with custom `OPENAI_BASE_URL`, or for direct Images API workflows even if built-in `image_gen` is exposed
 - Use explicit Responses API image-generation state only when the caller really needs it
+- Use `--transport atlas` only when the user explicitly wants Atlas Cloud text-to-image generation and has `ATLASCLOUD_API_KEY`
 - Batch-generate many prompts through `generate-batch`
 
 ## When not to use
@@ -41,6 +42,7 @@ Local saved-file raster image workflow backed by `scripts/codex_image.py`, shell
 - Prefer `--prompt` over a long trailing positional prompt when shell quoting would be awkward.
 - For simple one-shot `generate`, keep the prompt close to the user's wording. Only expand it into a longer art brief when the user explicitly asks for richer art direction or stricter visual constraints.
 - `generate` and `edit` default to the Images API. Use `--transport responses` only for explicit multi-turn image-generation state such as `--previous-response-id` or `--response-image-id`.
+- `--transport atlas` is opt-in and generate-only. It submits once, polls the prediction with bounded GET requests, and supports one PNG or JPEG output. Do not use it for edit, batch, transparent backgrounds, WebP, or Responses continuation state.
 - In `responses` mode, `edit` may omit local image inputs when the follow-up should continue from prior response state alone.
 - Attachment placeholders and image-set selectors only work inside a Codex thread with `CODEX_THREAD_ID` or `CODEX_SESSION_ID`.
 - These placeholders are an explicit local thread workflow, not the same thing as built-in `imagegen`'s native current-turn runtime image context.
@@ -74,7 +76,7 @@ Local saved-file raster image workflow backed by `scripts/codex_image.py`, shell
 1. Decide `generate`, `edit`, or `generate-batch`.
 2. Collect prompt, exact text, constraints, output target, and any input images.
 3. If the user mainly wants the normal native image conversation path and does not need saved-file, exact output path, explicit placeholder references, or API/CLI control, do not use this skill; let built-in `imagegen` handle it.
-4. Keep the default transport on the Images API. Reach for `--transport responses` only when explicit prior-response image state is part of the task.
+4. Keep the default transport on the Images API. Reach for `--transport responses` only when explicit prior-response image state is part of the task, or `--transport atlas` only when Atlas Cloud was explicitly selected for text-to-image generation.
 5. In a Codex thread with `CODEX_THREAD_ID` or `CODEX_SESSION_ID`, use `[Image #N]` for the most recent attachment-bearing turn, `[Turn -K Image #N]` for earlier attachment-bearing turns, `[Thread Image #N]` for stable thread-wide references, `[Last Output]` for the previous saved result image, or `--image-set active` / `--image-set last-output` / `--image-set latest-turn` for explicit reuse.
    A follow-up that adds one new image should usually look like `[Turn -1 Image #1]`, `[Turn -1 Image #2]`, and `[Image #1]` rather than `[Image #1]`, `[Image #2]`, `[Image #3]`.
    A follow-up that says "use the last result as the base and refine it" should usually include `[Last Output]` or `--image-set last-output`, then describe that image as the base result to refine in the prompt.

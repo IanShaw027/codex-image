@@ -93,6 +93,7 @@ Use `codex-image` when you want:
 - `edit`: edit or synthesize from one or more input images, defaulting to `POST /v1/images/edits`
 - `generate-batch`: run many generation jobs from a JSONL file
 - Explicit `POST /v1/responses` fallback via `--transport responses` for prior-response image state
+- Optional Atlas Cloud text-to-image generation via `--transport atlas`, using one async submit followed by bounded result polling
 - Config and auth discovery from `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `$CODEX_HOME/auth.json`, and `$CODEX_HOME/config.toml`
 - Direct size requests, including explicit non-standard values such as `1000x1800`
 - Ratio-style input such as `16:9`, `9:16`, and `6:16`, normalized into valid image sizes
@@ -151,6 +152,7 @@ That document now also includes:
 - **Transport split that matches real use**
   - Images API by default
   - Responses API only when explicit prior response state is actually needed
+  - Atlas Cloud only when explicitly selected for asynchronous text-to-image generation
 
 ## Install
 
@@ -191,6 +193,8 @@ Preferred runtime sources:
 
 Optional environment variables:
 
+- `ATLASCLOUD_API_KEY` (required only with `--transport atlas`)
+- `ATLASCLOUD_IMAGE_MODEL` (Atlas model override)
 - `CODEX_IMAGE_MODEL`
 - `CODEX_IMAGE_SIZE`
 - `CODEX_IMAGE_QUALITY`
@@ -207,6 +211,11 @@ Model behavior:
 - The default transport is the Images API
 - An explicit Responses transport is available when prior response image state
   is part of the task
+- `--transport atlas` defaults to `openai/gpt-image-2/text-to-image`, does not
+  require `OPENAI_BASE_URL`, and never falls back to an OpenAI credential
+- Atlas currently supports `generate` with one PNG or JPEG output; edit,
+  batch, transparent backgrounds, WebP, and output compression remain on the
+  existing transports
 - Official `gpt-image-2` requests reject transparent background locally before
   the request is sent
 - In API key mode, `OPENAI_BASE_URL` or an equivalent provider `base_url` is required
@@ -226,6 +235,17 @@ bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" genera
   --model gpt-image-2 \
   --size 3840x2160 \
   "Draw a Doraemon-inspired large language model infographic, image only, no text"
+```
+
+Generate through Atlas Cloud without changing the default provider:
+
+```bash
+export ATLASCLOUD_API_KEY="your-api-key"
+bash "${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image" generate \
+  --transport atlas \
+  --size 1536x1024 \
+  --format jpeg \
+  "Draw a clean futuristic AI wallpaper"
 ```
 
 Generate from an aspect ratio:

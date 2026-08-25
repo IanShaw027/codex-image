@@ -95,6 +95,40 @@ Best for:
 - explicit image-generation-call continuation
 - multi-turn state only when the caller really needs it
 
+### Explicit Atlas Cloud transport
+
+Select it with `generate --transport atlas`. It is optional and does not change
+the default Images API transport.
+
+Submit endpoint:
+
+- `POST https://api.atlascloud.ai/api/v1/model/generateImage`
+
+Default model and payload:
+
+```json
+{
+  "model": "openai/gpt-image-2/text-to-image",
+  "prompt": "Generate an image of ...",
+  "size": "1536x1024",
+  "quality": "medium",
+  "output_format": "jpeg"
+}
+```
+
+Result endpoint:
+
+- `GET https://api.atlascloud.ai/api/v1/model/result/{request_id}`
+
+The CLI sends exactly one generation POST. It then polls the result endpoint
+with bounded backoff until `completed`/`succeeded`, a terminal failure, or the
+configured timeout. Returned image URLs are downloaded without forwarding the
+Atlas API key.
+
+Current Atlas scope is intentionally narrow: text-to-image `generate`, one PNG
+or JPEG output, no edit, no batch, no transparent background, no WebP, no
+compression, and no Responses continuation ids.
+
 ## Supported options in this skill
 
 - `model`
@@ -127,6 +161,8 @@ Best for:
   - use default edit transport
 - Prior response continuation:
   - use explicit responses transport
+- Atlas Cloud text-to-image selected by the caller:
+  - use explicit atlas transport
 - Batch JSONL fan-out:
   - use local `generate-batch`, which still fans into generation-style upstream requests
 
@@ -156,6 +192,7 @@ The API `background` parameter is an output transparency control. It is not the 
 ## Model defaults in this skill
 
 - Images API model default: `gpt-image-2`
+- Atlas Cloud model default: `openai/gpt-image-2/text-to-image`
 
 ## Output decoding
 
@@ -169,3 +206,10 @@ For explicit Responses API mode:
 - decodes base64 and writes the file directly to disk
 - records the top-level `response_id` plus `image_generation_call` ids for follow-up reuse
 - current implementation keeps Responses support narrow on purpose and still defaults to the Images API
+
+For explicit Atlas Cloud mode:
+
+- reads `data.id` from the submit response
+- polls `data.status` through GET only
+- downloads `data.outputs[]` after completion
+- saves through the same deterministic output-path and size-verification logic
