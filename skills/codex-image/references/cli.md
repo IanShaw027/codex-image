@@ -12,7 +12,7 @@ On Windows, use `%CODEX_HOME%\skills\codex-image\scripts\codex-image.cmd` or `%U
 
 ## Commands
 
-- `generate`: default `POST /v1/images/generations`; explicit `--transport responses` uses `POST /v1/responses`
+- `generate`: default `POST /v1/images/generations`; explicit `--transport responses` uses `POST /v1/responses`; explicit `--transport atlas` uses Atlas Cloud async text-to-image
 - `edit`: default `POST /v1/images/edits`; explicit `--transport responses` uses `POST /v1/responses`
 - `generate-batch`: many generation jobs from JSONL
 
@@ -20,6 +20,7 @@ On Windows, use `%CODEX_HOME%\skills\codex-image\scripts\codex-image.cmd` or `%U
 
 ```bash
 bash "$CODEX_IMAGE" generate --size 3840x2160 "Prompt"
+bash "$CODEX_IMAGE" generate --transport atlas --size 1536x1024 --format jpeg "Prompt"
 bash "$CODEX_IMAGE" generate --transport responses --response-image-id ig_123 --prompt "Refine this image"
 bash "$CODEX_IMAGE" generate --size 3840x2160 --prompt "Prompt when shell quoting is awkward"
 bash "$CODEX_IMAGE" edit --image ./input.png "Change only X; keep Y unchanged"
@@ -40,6 +41,8 @@ bash "$CODEX_IMAGE" generate-batch --input ./prompts.jsonl --out-dir ./output/ba
 - If the model must see any real image input, use `edit`.
 - If the user wants the normal native image conversation path, current-turn image context, or the fastest simple follow-up and does not need local file/output-path control, prefer built-in `imagegen` instead of this skill.
 - `generate` and `edit` stay on the Images API by default; use `--transport responses` only when explicit prior response image state is part of the task.
+- `--transport atlas` is opt-in for `generate` only. It requires `ATLASCLOUD_API_KEY`, defaults to `openai/gpt-image-2/text-to-image`, submits once, and polls only the result endpoint with bounded backoff.
+- Atlas generation currently accepts one PNG or JPEG output. It rejects edit, batch, `--n > 1`, transparent backgrounds, WebP, output compression, and Responses continuation fields before submission.
 - In `responses` mode, `edit --previous-response-id ...` may omit local `--image` inputs when the follow-up should continue from prior response state alone.
 - After this skill is selected, usually invoke the installed launcher first and let it own runtime, auth, and attachment validation. Reach for config/auth or `--help` only when the launcher is missing or its failure still needs interpretation.
 - `generate --image` emits a warning and is rerouted to `edit`.
@@ -73,7 +76,7 @@ bash "$CODEX_IMAGE" generate-batch --input ./prompts.jsonl --out-dir ./output/ba
 - `--name <readable-prefix>`
 - `--prompt-file <path>`
 - `--prompt <text>` for `generate` and `edit`
-- `--transport <images|responses>` for `generate` and `edit`
+- `--transport <images|responses|atlas>` for `generate` and `edit`; `atlas` is accepted by `generate` only
 - `--previous-response-id <resp_id>` for `generate` and `edit` when using `responses`
 - `--response-image-id <ig_id>` for `generate` and `edit` when using `responses`
 - `--dry-run`

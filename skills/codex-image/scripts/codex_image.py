@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from fractions import Fraction
@@ -31,6 +32,11 @@ DEFAULT_SIZE = "1024x1024"
 DEFAULT_QUALITY = "medium"
 DEFAULT_FORMAT = "png"
 DEFAULT_TRANSPORT = "images"
+DEFAULT_ATLAS_MODEL = "openai/gpt-image-2/text-to-image"
+ATLAS_API_BASE = "https://api.atlascloud.ai/api/v1"
+ATLAS_INITIAL_POLL_DELAY = 2.0
+ATLAS_MAX_POLL_DELAY = 10.0
+ATLAS_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 DEFAULT_TIMEOUT = 600
 DEFAULT_BACKGROUND = "auto"
 DEFAULT_MODERATION = "auto"
@@ -452,7 +458,7 @@ def ensure_base_url(base_url: str | None, *, config_path: Path, provider_id: str
     )
 
 
-def resolve_runtime() -> dict[str, Any]:
+def resolve_runtime(*, require_base_url: bool = True) -> dict[str, Any]:
     config, config_path = load_codex_config()
     provider_id, provider = resolve_provider(config)
 
@@ -480,7 +486,11 @@ def resolve_runtime() -> dict[str, Any]:
 
     return {
         "api_key": api_key,
-        "base_url": ensure_base_url(base_url, config_path=config_path, provider_id=provider_id),
+        "base_url": (
+            ensure_base_url(base_url, config_path=config_path, provider_id=provider_id)
+            if require_base_url
+            else base_url.rstrip("/") if isinstance(base_url, str) and base_url.strip() else None
+        ),
         "model": resolve_default_model(config),
         "transport": os.environ.get("CODEX_IMAGE_TRANSPORT", DEFAULT_TRANSPORT),
         "size": os.environ.get("CODEX_IMAGE_SIZE", DEFAULT_SIZE),
@@ -1360,6 +1370,176 @@ def post_json(url: str, api_key: str, payload: dict[str, Any], timeout: int) -> 
     return execute_request(req, timeout)
 
 
+def get_json(url: str, api_key: str, timeout: int) -> dict[str, Any]:
+    log(f"GET {url}")
+    req = request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    return execute_request(req, timeout)
+
+
+def ensure_atlas_api_key() -> str:
+    api_key = os.environ.get("ATLASCLOUD_API_KEY")
+    if api_key and api_key.strip():
+        return api_key.strip()
+    fail("Atlas transport requires ATLASCLOUD_API_KEY")
+
+
+def effective_atlas_model(args_model: str | None) -> str:
+    return (
+        args_model
+        or os.environ.get("ATLASCLOUD_IMAGE_MODEL")
+        or DEFAULT_ATLAS_MODEL
+    )
+
+
+def build_atlas_generate_payload(
+    *,
+    model: str,
+    prompt: str,
+    n: int,
+    size: str,
+    quality: str,
+    background: str,
+    moderation: str,
+    fmt: str,
+    compression: int | None,
+    previous_response_id: str | None,
+    response_image_id: str | None,
+) -> dict[str, Any]:
+    if n != 1:
+        fail("Atlas transport currently supports exactly one output per request")
+    if fmt not in {"png", "jpeg"}:
+        fail("Atlas transport supports png or jpeg output only")
+    if compression is not None:
+        fail("Atlas transport does not support output compression")
+    if background == "transparent":
+        fail("Atlas transport does not support transparent background for text-to-image")
+    if previous_response_id or response_image_id:
+        fail("Atlas transport does not support Responses API continuation state")
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "output_format": fmt,
+    }
+    if size != "auto":
+        payload["size"] = size
+    if quality != "auto":
+        payload["quality"] = quality
+    if moderation == "low":
+        payload["moderation"] = moderation
+    return payload
+
+
+def unwrap_atlas_prediction(data: dict[str, Any]) -> dict[str, Any]:
+    code = data.get("code")
+    if code not in {None, 0, 200}:
+        fail(
+            "Atlas request failed:\n"
+            f"{json.dumps(data, ensure_ascii=False, indent=2)}"
+        )
+    prediction = data.get("data", data)
+    if not isinstance(prediction, dict):
+        fail(
+            "Atlas response missing prediction data:\n"
+            f"{json.dumps(data, ensure_ascii=False, indent=2)}"
+        )
+    return prediction
+
+
+def poll_atlas_prediction(
+    initial: dict[str, Any],
+    *,
+    api_key: str,
+    timeout: int,
+) -> list[str]:
+    prediction = unwrap_atlas_prediction(initial)
+    request_id = prediction.get("id")
+    if not isinstance(request_id, str) or not request_id:
+        fail("Atlas response missing prediction id")
+
+    deadline = time.monotonic() + timeout
+    delay = ATLAS_INITIAL_POLL_DELAY
+    while True:
+        status = str(prediction.get("status", "")).strip().lower()
+        if status in {"completed", "succeeded"}:
+            outputs = prediction.get("outputs")
+            if not isinstance(outputs, list) or not outputs:
+                fail("Atlas prediction completed without output URLs")
+            normalized = [value for value in outputs if isinstance(value, str) and value]
+            if not normalized:
+                fail("Atlas prediction completed without valid output URLs")
+            return normalized
+        if status in {"failed", "canceled", "cancelled"}:
+            detail = prediction.get("error") or prediction.get("message") or status
+            fail(f"Atlas prediction {request_id} failed: {detail}")
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            fail(f"Atlas prediction {request_id} timed out after {timeout} seconds")
+        time.sleep(min(delay, remaining))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            fail(f"Atlas prediction {request_id} timed out after {timeout} seconds")
+        prediction = unwrap_atlas_prediction(
+            get_json(
+                f"{ATLAS_API_BASE}/model/result/{request_id}",
+                api_key,
+                max(1, math.ceil(remaining)),
+            )
+        )
+        delay = min(delay * 1.5, ATLAS_MAX_POLL_DELAY)
+
+
+def download_atlas_outputs(
+    urls: list[str],
+    out_paths: list[Path],
+    *,
+    force: bool,
+    expected_size: str | None,
+    timeout: int,
+) -> list[Path]:
+    if len(urls) < len(out_paths):
+        fail(
+            f"Atlas output count {len(urls)} does not match expected outputs {len(out_paths)}"
+        )
+
+    written: list[Path] = []
+    for url, out_path in zip(urls, out_paths):
+        parsed = urlparse.urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            fail("Atlas returned an invalid output URL")
+        out_path = ensure_parent(out_path)
+        if out_path.exists() and not force:
+            fail(f"output already exists: {out_path} (use --force to overwrite)")
+
+        req = request.Request(url, headers={"Accept": "image/*"}, method="GET")
+        try:
+            with request.urlopen(req, timeout=timeout) as response:
+                content_type = response.headers.get_content_type().lower()
+                if not content_type.startswith("image/"):
+                    fail(f"Atlas output URL returned non-image content: {content_type}")
+                body = response.read(ATLAS_MAX_OUTPUT_BYTES + 1)
+        except error.HTTPError as exc:
+            fail(f"Atlas output download failed: status={exc.code}")
+        except error.URLError as exc:
+            fail(f"Atlas output download failed: {exc}")
+        if len(body) > ATLAS_MAX_OUTPUT_BYTES:
+            fail(
+                "Atlas output exceeds the 64 MiB download limit"
+            )
+        out_path.write_bytes(body)
+        ensure_output_dimensions(out_path, expected_size)
+        written.append(out_path)
+    return written
+
+
 def encode_multipart(
     fields: dict[str, Any],
     files: list[tuple[str, Path]],
@@ -1496,8 +1676,8 @@ def effective_model(args_model: str | None, runtime: dict[str, Any]) -> str:
 
 def effective_transport(args_transport: str | None, runtime: dict[str, Any]) -> str:
     transport = (args_transport or runtime["transport"]).strip().lower()
-    if transport not in {"images", "responses"}:
-        fail("transport must be one of images or responses")
+    if transport not in {"images", "responses", "atlas"}:
+        fail("transport must be one of images, responses, or atlas")
     return transport
 
 
@@ -1781,13 +1961,23 @@ def cmd_generate(args: argparse.Namespace) -> int:
     if getattr(args, "image", None):
         log("redirecting generate --image request to edit")
         return cmd_edit(redirect_generate_args_to_edit(args))
-    runtime = resolve_runtime()
-    api_key = ensure_api_key(runtime)
+    requested_transport = (
+        getattr(args, "transport", None)
+        or os.environ.get("CODEX_IMAGE_TRANSPORT")
+        or DEFAULT_TRANSPORT
+    ).strip().lower()
+    runtime = resolve_runtime(require_base_url=requested_transport != "atlas")
     prompt = read_prompt(args.prompt, args.prompt_file, prompt_flag=args.prompt_flag)
-    model = effective_model(args.model, runtime)
     transport = effective_transport(getattr(args, "transport", None), runtime)
+    api_key = ensure_atlas_api_key() if transport == "atlas" else ensure_api_key(runtime)
+    model = (
+        effective_atlas_model(args.model)
+        if transport == "atlas"
+        else effective_model(args.model, runtime)
+    )
     size, delivery_size, quality, fmt, compression, background, moderation, size_note = common_runtime_values(args, runtime)
-    validate_model_background(model, background)
+    if transport != "atlas":
+        validate_model_background(model, background)
     n = args.n
     validate_n(n)
 
@@ -1803,7 +1993,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     log(
         "generate start "
-        f"base_url={runtime['base_url']} model={model} "
+        f"base_url={ATLAS_API_BASE if transport == 'atlas' else runtime['base_url']} model={model} "
         f"transport={transport} "
         f"size={size} quality={quality} format={fmt} background={background} "
         f"moderation={moderation} n={n} outputs={len(out_paths)}"
@@ -1816,7 +2006,27 @@ def cmd_generate(args: argparse.Namespace) -> int:
         api_size=size,
         delivery_size=delivery_size,
     )
-    if transport == "images":
+    if transport == "atlas":
+        payload = build_atlas_generate_payload(
+            model=model,
+            prompt=prompt,
+            n=n,
+            size=size,
+            quality=quality,
+            background=background,
+            moderation=moderation,
+            fmt=fmt,
+            compression=compression,
+            previous_response_id=getattr(args, "previous_response_id", None),
+            response_image_id=getattr(args, "response_image_id", None),
+        )
+        preview = {
+            "endpoint": "/api/v1/model/generateImage",
+            "transport": transport,
+            "outputs": preview_output_strings(out_paths),
+            **payload,
+        }
+    elif transport == "images":
         payload = build_generate_payload(
             model=model,
             prompt=prompt,
@@ -1867,7 +2077,26 @@ def cmd_generate(args: argparse.Namespace) -> int:
     ):
         return 0
 
-    if transport == "images":
+    if transport == "atlas":
+        initial = post_json(
+            f"{ATLAS_API_BASE}/model/generateImage",
+            api_key,
+            payload,
+            runtime["timeout"],
+        )
+        urls = poll_atlas_prediction(
+            initial,
+            api_key=api_key,
+            timeout=runtime["timeout"],
+        )
+        written = download_atlas_outputs(
+            urls,
+            out_paths,
+            force=args.force,
+            expected_size=delivery_size,
+            timeout=runtime["timeout"],
+        )
+    elif transport == "images":
         data = post_json(
             build_api_url(runtime["base_url"], "/images/generations"),
             api_key,
@@ -1884,12 +2113,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
         )
         images = extract_images_from_responses_payload(data)
         response_id, image_generation_call_ids = extract_responses_metadata(data)
-    written = decode_and_save_many(
-        images,
-        out_paths,
-        force=args.force,
-        expected_size=delivery_size,
-    )
+    if transport != "atlas":
+        written = decode_and_save_many(
+            images,
+            out_paths,
+            force=args.force,
+            expected_size=delivery_size,
+        )
     thread_id = current_thread_id()
     if thread_id is not None:
         save_last_output_set(thread_id, written)
@@ -1911,6 +2141,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
 
 def cmd_edit(args: argparse.Namespace) -> int:
+    requested_transport = (
+        getattr(args, "transport", None)
+        or os.environ.get("CODEX_IMAGE_TRANSPORT")
+        or DEFAULT_TRANSPORT
+    ).strip().lower()
+    if requested_transport == "atlas":
+        fail("Atlas transport currently supports generate only; edit remains on images or responses")
     runtime = resolve_runtime()
     api_key = ensure_api_key(runtime)
     transport = effective_transport(getattr(args, "transport", None), runtime)
@@ -2281,8 +2518,11 @@ def build_parser() -> argparse.ArgumentParser:
     transport = argparse.ArgumentParser(add_help=False)
     transport.add_argument(
         "--transport",
-        choices=("images", "responses"),
-        help="upstream transport: default images API, or explicit responses API for multi-turn image generation state",
+        choices=("images", "responses", "atlas"),
+        help=(
+            "upstream transport: default images API, responses API for multi-turn "
+            "state, or Atlas Cloud async text-to-image"
+        ),
     )
     transport.add_argument(
         "--previous-response-id",

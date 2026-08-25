@@ -360,6 +360,185 @@ class ResponsesTransportRegressionTests(unittest.TestCase):
         self.assertIn("${CODEX_HOME:-$HOME/.codex}/skills/codex-image/scripts/codex-image", prompt)
         self.assertIn(".cmd", prompt)
 
+    def test_atlas_generate_dry_run_uses_async_endpoint_and_model(self):
+        parser = codex_image.build_parser()
+        args = parser.parse_args(
+            [
+                "generate",
+                "--transport",
+                "atlas",
+                "--size",
+                "1536x1024",
+                "--format",
+                "jpeg",
+                "--prompt",
+                "Draw a skyline",
+                "--dry-run",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ATLASCLOUD_API_KEY": "atlas-key"}, clear=False):
+                with mock.patch.object(
+                    codex_image,
+                    "resolve_runtime",
+                    return_value=self.runtime(tmpdir),
+                ):
+                    with mock.patch.object(
+                        codex_image,
+                        "maybe_print_preview",
+                        return_value=True,
+                    ) as maybe_print_preview:
+                        result = codex_image.cmd_generate(args)
+
+        self.assertEqual(result, 0)
+        preview = maybe_print_preview.call_args.args[0]
+        self.assertEqual(preview["endpoint"], "/api/v1/model/generateImage")
+        self.assertEqual(preview["transport"], "atlas")
+        self.assertEqual(preview["model"], "openai/gpt-image-2/text-to-image")
+        self.assertEqual(preview["size"], "1536x1024")
+        self.assertEqual(preview["output_format"], "jpeg")
+
+    def test_atlas_generate_submits_once_then_polls_with_get(self):
+        parser = codex_image.build_parser()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "atlas.png"
+            args = parser.parse_args(
+                [
+                    "generate",
+                    "--transport",
+                    "atlas",
+                    "--out",
+                    str(output_path),
+                    "--prompt",
+                    "Draw a skyline",
+                ]
+            )
+            with mock.patch.dict(os.environ, {"ATLASCLOUD_API_KEY": "atlas-key"}, clear=False):
+                with mock.patch.object(
+                    codex_image,
+                    "resolve_runtime",
+                    return_value=self.runtime(tmpdir),
+                ):
+                    with mock.patch.object(
+                        codex_image,
+                        "post_json",
+                        return_value={"data": {"id": "pred_123", "status": "created"}},
+                    ) as post_json:
+                        with mock.patch.object(
+                            codex_image,
+                            "get_json",
+                            side_effect=[
+                                {"data": {"id": "pred_123", "status": "processing"}},
+                                {
+                                    "data": {
+                                        "id": "pred_123",
+                                        "status": "completed",
+                                        "outputs": ["https://cdn.example.com/atlas.png"],
+                                    }
+                                },
+                            ],
+                        ) as get_json:
+                            with mock.patch.object(codex_image.time, "sleep"):
+                                with mock.patch.object(
+                                    codex_image,
+                                    "download_atlas_outputs",
+                                    return_value=[output_path],
+                                ) as download_outputs:
+                                    result = codex_image.cmd_generate(args)
+
+        self.assertEqual(result, 0)
+        post_json.assert_called_once()
+        self.assertEqual(get_json.call_count, 2)
+        self.assertTrue(
+            get_json.call_args_list[0].args[0].endswith(
+                "/api/v1/model/result/pred_123"
+            )
+        )
+        download_outputs.assert_called_once()
+
+    def test_atlas_output_download_does_not_forward_api_credentials(self):
+        class FakeResponse:
+            def __init__(self) -> None:
+                headers = Message()
+                headers.add_header("Content-Type", "image/png")
+                self.headers = headers
+
+            def read(self, _limit: int | None = None) -> bytes:
+                return b"png"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        captured_requests = []
+
+        def fake_urlopen(req, timeout):
+            captured_requests.append((req, timeout))
+            return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "atlas.png"
+            with mock.patch.object(codex_image.request, "urlopen", side_effect=fake_urlopen):
+                written = codex_image.download_atlas_outputs(
+                    ["https://cdn.example.com/atlas.png"],
+                    [output_path],
+                    force=False,
+                    expected_size=None,
+                    timeout=30,
+                )
+
+        self.assertEqual(written, [output_path])
+        request_object, timeout = captured_requests[0]
+        self.assertEqual(timeout, 30)
+        self.assertIsNone(request_object.get_header("Authorization"))
+        self.assertEqual(request_object.get_header("Accept"), "image/*")
+
+    def test_atlas_generate_rejects_multiple_outputs_before_submit(self):
+        parser = codex_image.build_parser()
+        args = parser.parse_args(
+            [
+                "generate",
+                "--transport",
+                "atlas",
+                "--n",
+                "2",
+                "--prompt",
+                "Draw two skylines",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ATLASCLOUD_API_KEY": "atlas-key"}, clear=False):
+                with mock.patch.object(
+                    codex_image,
+                    "resolve_runtime",
+                    return_value=self.runtime(tmpdir),
+                ):
+                    with mock.patch.object(codex_image, "post_json") as post_json:
+                        with self.assertRaises(SystemExit):
+                            codex_image.cmd_generate(args)
+
+        post_json.assert_not_called()
+
+    def test_atlas_transport_rejects_edit(self):
+        parser = codex_image.build_parser()
+        args = parser.parse_args(
+            [
+                "edit",
+                "--transport",
+                "atlas",
+                "--prompt",
+                "Change the sky",
+            ]
+        )
+
+        with self.assertRaises(SystemExit):
+            codex_image.cmd_edit(args)
+
     def test_cli_reference_makes_image_placeholder_history_semantics_explicit(self):
         cli_text = (SKILL_ROOT / "references" / "cli.md").read_text(encoding="utf-8")
 
